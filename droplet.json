@@ -1,0 +1,45 @@
+{
+  "id": "drop-portal",
+  "name": "Drop Portal",
+  "version": "1.0.0",
+  "summary": "Flick files off your phone and they land on your Mac",
+  "description": "Pick photos, videos or files on your phone and flick a card off the left edge of the screen. It crosses in the effect you pick (Portal light, Liquid, Wormhole, Beam or Paper plane) and lands on your Mac, on the screen with the pointer: click it to open, or drag it straight into any app. Text works too: paste it on the phone, send it, and it is on your Mac's clipboard. Tap several cards to flick them together. It works the other way too: drag files to the right edge of your Mac's screen, select them in Finder and press Control-Option-Right Arrow, use Finder's Quick Action Send to phone, drop them on the shelf widget, or send your Mac's clipboard, and they show up on the phone page to save or copy. Files sent while the page is closed wait up to a day and arrive when you open it.\n\nThere is no phone app to install. Add the Drop Portal widget to Droppy's shelf and scan its QR code (it is in Drop Portal's settings too) with the phone camera and the page opens in the browser; add it to the Home Screen to keep it one tap away. The phone and the Mac need to be on the same Wi-Fi; where a Wi-Fi keeps devices apart, use the phone's Personal Hotspot.\n\nPrivacy: it works only on your local network. While Drop Portal is on, the Mac listens on ports 8787 (the page and uploads) and 8788 (the live preview); nothing goes through a server or leaves your Wi-Fi. Every request carries the pairing code from the QR code, so only a phone that scanned it can send, and Reset pairing locks out every phone at once. Files are saved to Downloads › Drop Portal and quarantined like browser downloads. The connection is plain HTTP, so use it on networks you trust.",
+  "category": "Productivity",
+  "kit": {
+    "abi": 1,
+    "minAPI": "1.23.0"
+  },
+  "minAppVersion": "15.3.0",
+  "capabilities": [
+    "network-server",
+    "notch-banner",
+    "clipboard-write",
+    "apple-events",
+    "global-shortcuts"
+  ],
+  "surfaces": [
+    "shelf-widget",
+    "settings-pane"
+  ],
+  "icon": "Portal.icon",
+  "creator": {
+    "name": "Josak Cat",
+    "kind": "community",
+    "avatar": "Creator.png",
+    "gitlab": "Josakcat"
+  },
+  "source": {
+    "repository": "https://github.com/Josakcat/drop-portal",
+    "license": "MIT"
+  },
+  "keywords": [
+    "iphone",
+    "transfer",
+    "photo",
+    "video",
+    "file",
+    "clipboard",
+    "phone",
+    "send"
+  ]
+}

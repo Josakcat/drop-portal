@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+Package.resolved
+.DS_Store
+shots/
+/*.icon
+/.droppykit/*.icon
+# Machine-specific agent wiring (absolute paths); regenerate with `droppykit agent --force`.
+.mcp.json
+.cursor/mcp.json
+design/
+# The chosen Rift Drop logo (design/logo concept 1), kept in git; droppykit submit still leaves it out.
+!/.droppykit/Portal.icon

@@ -209,6 +209,15 @@ struct DropPortalSettings: View {
                 DropletToggleRow(title: "Sound", icon: "speaker.wave.2",
                                  subtitle: "A soft sound when a file lands.",
                                  isOn: Binding(get: { droplet.sound }, set: { droplet.setSound($0) }))
+                DropletToggleRow(title: "Haptics", icon: "hand.tap",
+                                 subtitle: "A light tap on a Force Touch trackpad as the card appears, a firmer one as it lands.",
+                                 isOn: Binding(get: { droplet.haptics }, set: { droplet.setHaptics($0) }))
+                DropletToggleRow(title: "Landing sparkle", icon: "sparkle",
+                                 subtitle: "Sparks in the photo's colors, then the card tilts toward your pointer.",
+                                 isOn: Binding(get: { droplet.celebration }, set: { droplet.setCelebration($0) }))
+                DropletToggleRow(title: "Animated file name", icon: "character.cursor.ibeam",
+                                 subtitle: "The name writes itself in, on the Mac and the phone.",
+                                 isOn: Binding(get: { droplet.kineticName }, set: { droplet.setKineticName($0) }))
             }
         }
     }
@@ -221,6 +230,12 @@ struct DropPortalSettings: View {
         case .wormhole: "A vortex pulls in stars and spins the card out where it lands."
         case .beam: "Scanlines fill the edge, the card glitches across and is rebuilt by light."
         case .plane: "The card folds into a paper plane that loops in and lands in a puff."
+        case .stardust: "The card loosens into grains of light and gathers again where it lands."
+        case .lightning: "One short strike of lightning carries the card across and lands it."
+        case .cheek: "Pip the hamster stuffs the photo in a cheek and spits it out on your Mac."
+        case .pounce: "Tofu the cat leaps through a cat flap with the photo and drops it in place."
+        case .mole: "Digby the mole tunnels across with the photo on his helmet and salutes."
+        case .ducks: "The Matcha Trio march the photo across on their caps, one duckling per file."
         }
     }
 
@@ -298,10 +313,10 @@ struct DropPortalSettings: View {
                 DisclosureRow(title: "Options", icon: "slider.horizontal.3", isOpen: $moreOpen)
                 if moreOpen {
                     DropletToggleRow(title: "Add received files to File Tray", icon: "tray.and.arrow.down",
-                                     subtitle: "Files also appear in Droppy's File Tray.",
+                                     subtitle: "Every file from your phone goes to Droppy's File Tray as well as Downloads.",
                                      isOn: Binding(get: { droplet.addToTray }, set: { droplet.setAddToTray($0) }))
                     DropletToggleRow(title: "Open links from your phone", icon: "safari",
-                                     subtitle: "A link you send from the phone opens in your browser.",
+                                     subtitle: "When on, a link sent from your phone also opens in your browser.",
                                      isOn: Binding(get: { droplet.openLinks }, set: { droplet.setOpenLinks($0) }))
                     DropletToggleRow(title: "Drag to the right edge", icon: "arrow.right.to.line",
                                      subtitle: "Dragging files to the screen's right edge sends them.",

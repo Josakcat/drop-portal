@@ -254,7 +254,7 @@ final class EffectTests: XCTestCase {
             XCTAssertEqual(PortalEffect(stored: legacy), .portal, legacy)
         }
         XCTAssertEqual(PortalEffect(stored: nil), .portal)
-        XCTAssertEqual(PortalEffect.allCases.map(\.title), ["Portal light", "Liquid", "Wormhole", "Beam", "Paper plane"])
+        XCTAssertEqual(PortalEffect.allCases.map(\.title), ["Portal light", "Liquid", "Wormhole", "Beam", "Paper plane", "Stardust", "Lightning", "Cheek Stash (Pip)", "Pounce Post (Tofu)", "Mole Express (Digby)", "Duckling Parade (Matcha Trio)"])
     }
 
     func testPageCarriesTheEffect() {

@@ -21,14 +21,56 @@ public struct PeekInfo: Equatable, Sendable {
     public var thumb: Data
     /// Cards flicked together, 1 to 99; the uploads after the first repeat the id.
     public var count: Int
+    /// The courier effects' variant (Couriers.swift), made by the page when the
+    /// drag starts so both screens play the same one; nil from an older page.
+    public var seed: UInt32?
+    /// The page's last flick was under 10 s ago: the courier's short version.
+    public var short: Bool
 
-    public init(id: String, name: String, kind: Kind, size: Int64, thumb: Data = Data(), count: Int = 1) {
+    public init(id: String, name: String, kind: Kind, size: Int64, thumb: Data = Data(), count: Int = 1,
+                seed: UInt32? = nil, short: Bool = false) {
         self.id = id
         self.name = name
         self.kind = kind
         self.size = size
         self.thumb = thumb
         self.count = count
+        self.seed = seed
+        self.short = short
+    }
+}
+
+/// How the finger let go of the card on the phone, sent with `peek-commit`
+/// (`vx`, `vy`, `exitY`, `angle`). Every field is optional on the wire; a
+/// release with no usable velocity is nil and the Mac flies its own way.
+public struct PeekRelease: Equatable, Sendable {
+    /// Release velocity in the page's CSS px per second, y down (negative x = toward the left edge).
+    public var vx: Double
+    public var vy: Double
+    /// Where the card leaves the phone's left edge: 0 top to 1 bottom.
+    public var exitY: Double?
+    /// The card's turn at the release, degrees clockwise as CSS draws it.
+    public var angle: Double
+
+    /// Faster than this is a glitch in the samples, not a finger.
+    public static let maxSpeed = 20_000.0
+
+    public init(vx: Double, vy: Double, exitY: Double? = nil, angle: Double = 0) {
+        let speed = (vx * vx + vy * vy).squareRoot()
+        let k = speed > Self.maxSpeed ? Self.maxSpeed / speed : 1
+        self.vx = vx * k
+        self.vy = vy * k
+        self.exitY = exitY.map { min(1, max(0, $0)) }
+        self.angle = min(90, max(-90, angle))
+    }
+
+    init?(json: [String: Any]) {
+        func number(_ key: String) -> Double? {
+            guard let n = json[key] as? NSNumber, !PeekMessage.isBool(n), n.doubleValue.isFinite else { return nil }
+            return n.doubleValue
+        }
+        guard let vx = number("vx"), let vy = number("vy") else { return nil }
+        self.init(vx: vx, vy: vy, exitY: PeekMessage.unit(json["exitY"]), angle: number("angle") ?? 0)
     }
 }
 
@@ -36,8 +78,10 @@ public struct PeekInfo: Equatable, Sendable {
 public enum PeekMessage: Equatable, Sendable {
     case hello(token: String)
     case start(PeekInfo)
-    case move(id: String, progress: Double)
-    case commit(id: String)
+    /// `y`: the card's middle on the phone, 0 top to 1 bottom; nil from an older page.
+    case move(id: String, progress: Double, y: Double? = nil)
+    /// `release`: how the finger let go; nil from an older page.
+    case commit(id: String, release: PeekRelease? = nil)
     case progress(id: String, progress: Double)
     case cancel(id: String)
 
@@ -54,7 +98,7 @@ public enum PeekMessage: Equatable, Sendable {
         switch self {
         case .hello: nil
         case .start(let info): info.id
-        case .move(let id, _), .commit(let id), .progress(let id, _), .cancel(let id): id
+        case .move(let id, _, _), .commit(let id, _), .progress(let id, _), .cancel(let id): id
         }
     }
 
@@ -87,20 +131,39 @@ public enum PeekMessage: Equatable, Sendable {
                 thumb = decoded
             }
             let count = min(99, max(1, (json["count"] as? NSNumber)?.intValue ?? 1))
-            return .start(PeekInfo(id: id, name: name, kind: kind, size: size, thumb: thumb, count: count))
+            // A whole number 1 ... 2³² − 1; anything else is no seed.
+            var seed: UInt32?
+            if let n = json["seed"] as? NSNumber, !isBool(n), n.doubleValue.isFinite,
+               n.doubleValue >= 1, n.doubleValue <= Double(UInt32.max), n.doubleValue.rounded() == n.doubleValue {
+                seed = UInt32(n.doubleValue)
+            }
+            let short = (json["short"] as? NSNumber).map { isBool($0) && $0.boolValue } ?? false
+            return .start(PeekInfo(id: id, name: name, kind: kind, size: size, thumb: thumb, count: count,
+                                   seed: seed, short: short))
         case "peek-move", "peek-progress":
             guard let number = json["progress"] as? NSNumber else { throw ParseError.malformed }
             let value = number.doubleValue
             guard value.isFinite else { throw ParseError.malformed }
             let clamped = min(1, max(0, value))
-            return type == "peek-move" ? .move(id: id, progress: clamped) : .progress(id: id, progress: clamped)
+            return type == "peek-move" ? .move(id: id, progress: clamped, y: unit(json["y"])) : .progress(id: id, progress: clamped)
         case "peek-commit":
-            return .commit(id: id)
+            return .commit(id: id, release: PeekRelease(json: json))
         case "peek-cancel":
             return .cancel(id: id)
         default:
             throw ParseError.unknownType
         }
+    }
+
+    /// A finite number clamped to 0...1, or nil.
+    static func unit(_ value: Any?) -> Double? {
+        guard let number = value as? NSNumber, !isBool(number), number.doubleValue.isFinite else { return nil }
+        return min(1, max(0, number.doubleValue))
+    }
+
+    /// JSON's true and false arrive as NSNumber too.
+    static func isBool(_ number: NSNumber) -> Bool {
+        CFGetTypeID(number) == CFBooleanGetTypeID()
     }
 
     /// Starts with the JPEG magic, FF D8 FF.
@@ -121,8 +184,8 @@ public enum PeekMessage: Equatable, Sendable {
 /// What the Mac should draw.
 public enum PeekEvent: Equatable, Sendable {
     case start(PeekInfo)
-    case move(id: String, progress: Double)
-    case commit(id: String)
+    case move(id: String, progress: Double, y: Double? = nil)
+    case commit(id: String, release: PeekRelease? = nil)
     case progress(id: String, progress: Double)
     case cancel(id: String)
 }
@@ -156,10 +219,10 @@ public struct PeekTracker: Sendable {
             guard let id = message.id, id == currentID else { return nil }
             lastHeard = now
             switch message {
-            case .move(_, let p): return isCommitted ? nil : .move(id: id, progress: p)
-            case .commit:
+            case .move(_, let p, let y): return isCommitted ? nil : .move(id: id, progress: p, y: y)
+            case .commit(_, let release):
                 isCommitted = true
-                return .commit(id: id)
+                return .commit(id: id, release: release)
             case .progress(_, let p): return isCommitted ? .progress(id: id, progress: p) : nil
             case .cancel:
                 currentID = nil

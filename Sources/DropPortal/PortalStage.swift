@@ -31,7 +31,7 @@ struct Ease {
     static let `in` = Ease(x1: 0.55, y1: 0, x2: 0.9, y2: 0.45)
     static let inOut = Ease(x1: 0.45, y1: 0, x2: 0.4, y2: 1)
 
-    // The motion spec's curves (docs/effects.md, "Curves"), by its letters.
+    // The motion spec's curves (.droppykit/docs/effects.md, "Curves"), by its letters.
     /// A: accelerating into the phone's left edge.
     static let accel = Ease(x1: 0.40, y1: 0, x2: 0.85, y2: 0.35)
     /// T and O: decelerating to the landing, waves and folds opening.
@@ -105,7 +105,7 @@ struct Motion {
             if let position { layer.position = position(u) }
             return
         }
-        let n = max(6, Int((duration * 60).rounded()))
+        let n = max(6, Int((duration * FrameRate.samples).rounded()))
         let us = (0...n).map { ease(CGFloat($0) / CGFloat(n)) }
         let begin = layer.convertTime(CACurrentMediaTime(), from: nil) + delay
         func add(_ key: String, _ values: [Any]) {
@@ -115,6 +115,7 @@ struct Motion {
             a.beginTime = begin
             a.fillMode = .backwards
             a.calculationMode = .linear
+            a.preferredFrameRateRange = FrameRate.range()
             layer.setValue(values.last, forKeyPath: key)
             layer.add(a, forKey: "motion.\(key)")
         }
@@ -466,6 +467,8 @@ extension PortalEffect {
         case .wormhole: 0.30
         case .beam: 0.32
         case .plane: 0.56
+        case .stardust, .lightning: skyFlight
+        case .cheek, .pounce, .mole, .ducks: (courier?.landingMS ?? 500) / 1000
         }
     }
 }
@@ -537,9 +540,14 @@ final class StageView: NSView {
     }
 
     let effect: PortalEffect
-    private let seam: CGPoint
+    /// This crossing's release to landing: the effect's own, or the thrown
+    /// path's (`ThrowFlight`), set before `send()`.
+    var flight: Double
+    /// Where the card comes through: x on the edge, y the card's exit height (`moveSeam`).
+    private var seam: CGPoint
     private let landing: CGPoint
     private let palette: PortalPalette
+    private var vignette: CALayer?
     private let k: CGFloat
     private let root = CALayer()
     /// What the drag lights: vignette, wash and the effect's edge.
@@ -578,16 +586,24 @@ final class StageView: NSView {
     /// Paper plane: breeze at the seam and two contrails.
     private var breeze: CALayer?
     private var contrails: [CAShapeLayer] = []
+    /// The GPU's light and particles (MetalCrossing.swift), nil on the Core Animation path.
+    private var gpu: GPUStage?
+    /// Stardust and Lightning (SkyCrossing.swift): their own GPU passes or CA fallback.
+    private var sky: SkyStage?
+    /// The couriers (Couriers/CourierCrossing.swift): the character is the effect.
+    private(set) var courier: CourierCrossing?
 
     private var w: CGFloat { bounds.width }
     private var h: CGFloat { bounds.height }
 
     init(frame: NSRect, effect: PortalEffect, palette: PortalPalette, seam: CGPoint, landing: CGPoint, backingScale: CGFloat = 2) {
         self.effect = effect
+        self.flight = effect.flight
         self.seam = seam
         self.landing = landing
         card = seam
-        self.palette = palette
+        // Lightning's halo, wash and rim are ice-blue or lavender in every colour, never red.
+        self.palette = effect == .lightning ? palette.lightningSafe : palette
         // The spec's numbers are for 1280 × 800; its effects stay under 78% of the height.
         k = Self.scale(for: frame.size)
         super.init(frame: frame)
@@ -595,6 +611,9 @@ final class StageView: NSView {
         root.frame = bounds
         layer?.addSublayer(root)
         ambient.frame = bounds
+        // The vignette, the wash and the edge light fade each on its own: a group
+        // opacity would render the whole screen offscreen every frame of the drag.
+        ambient.allowsGroupOpacity = false
         fx.frame = bounds
         root.addSublayer(ambient)
         buildCommon()
@@ -604,6 +623,7 @@ final class StageView: NSView {
         case .wormhole: buildWormhole()
         case .beam: buildBeam()
         case .plane: buildPlane()
+        case .stardust, .lightning, .cheek, .pounce, .mole, .ducks: break
         }
         lightLayout = PortalLightTexture.layout(effect: effect, screen: frame.size, landing: landing, k: k)
         impactFrame = lightLayout.frame
@@ -611,8 +631,25 @@ final class StageView: NSView {
         build.layer.anchorPoint = lightAnchor
         build.layer.opacity = 0
         root.insertSublayer(build.layer, above: ambient)
+        gpu = GPUStage(frame: bounds, effect: effect, palette: palette, seam: seam, landing: landing, k: k, scale: backingScale)
+        if let gpu {
+            root.insertSublayer(gpu.layer, above: build.layer)
+            // The shader draws these itself.
+            for layer in [tunnel, ribbon, lines, effect == .portal || effect == .liquid ? halo : nil].compactMap({ $0 }) { layer.isHidden = true }
+        }
+        sky = SkyStage(frame: bounds, effect: effect, palette: palette, seam: seam, landing: landing, k: k, scale: backingScale)
+        if let sky { root.insertSublayer(sky.layer, above: build.layer) }
         buildCardGlow()
+        // Stardust's card is grains until it lands: no halo round a card that is not there.
+        if sky?.onGPU == true, effect == .stardust { cardGlow.isHidden = true }
         root.addSublayer(fx)
+        courier = CourierCrossing(effect: effect, scene: CourierScene(size: frame.size, edge: seam, landing: landing,
+                                                                     card: LandingPresenter.fileCardSize))
+        if let courier {
+            // No light at all: no vignette, no edge wash, no halo; the character is the effect.
+            root.addSublayer(courier.layer)
+            for layer in [ambient, cardGlow, build.layer] { layer.isHidden = true }
+        }
         still { ambient.opacity = 0 }
         arrange()
         PortalLightTexture.prepare(effect: effect, palette: palette, layout: lightLayout, scale: backingScale) { [weak self] image in
@@ -676,9 +713,11 @@ final class StageView: NSView {
     private func buildCommon() {
         // A soft vignette around the edge the card comes through, never darker than 35%.
         let black = NSColor.black
-        ambient.addSublayer(glow([black.withAlphaComponent(0), black.withAlphaComponent(Look.vignette),
-                                  black.withAlphaComponent(Look.vignette * 0.5), black.withAlphaComponent(0)],
-                                 [0, 0.28, 0.62, 1], center: seam, rx: w * 0.75, ry: h * 1.05))
+        let shade = glow([black.withAlphaComponent(0), black.withAlphaComponent(Look.vignette),
+                          black.withAlphaComponent(Look.vignette * 0.5), black.withAlphaComponent(0)],
+                         [0, 0.28, 0.62, 1], center: seam, rx: w * 0.75, ry: h * 1.05)
+        ambient.addSublayer(shade)
+        vignette = shade
         // A narrow wash of the effect's light on the edge: a doorway, not a screen wash.
         let wash = gradient(.axial, [palette.glow.withAlphaComponent(0.5), palette.glow.withAlphaComponent(0.14),
                                      palette.glow.withAlphaComponent(0.04), palette.glow.withAlphaComponent(0)], [0, 0.3, 0.65, 1])
@@ -773,12 +812,18 @@ final class StageView: NSView {
                                [0, 0.5, 1], center: .zero, rx: 340 * k, ry: 340 * k))
         // Three rims, 560 / 390 / 250 across, tilted 45° / 30° / 15°: a tunnel in perspective.
         for (i, d) in ([560, 390, 250] as [CGFloat]).enumerated() {
-            let rim = Sprite.layer(.rim, i == 0 ? p.core : p.glow, size: d * k, at: .zero)
-            rim.opacity = 0.7
-            // A soft halo on the same layer's plane: one texture each, no filter.
+            // A transform layer: the rim and its halo turn together without being
+            // flattened into an offscreen pass of their own every frame.
+            let rim = CATransformLayer()
+            rim.bounds = CGRect(x: 0, y: 0, width: d * k, height: d * k)
+            rim.position = .zero
+            let ring = Sprite.layer(.rim, i == 0 ? p.core : p.glow, size: d * k, at: CGPoint(x: d * k / 2, y: d * k / 2))
+            ring.opacity = 0.7
+            // A soft halo on the same plane: one texture each, no filter.
             let halo = Sprite.layer(.ring, i == 0 ? p.glow : p.accent, size: d * k * 1.1, at: CGPoint(x: d * k / 2, y: d * k / 2))
-            halo.opacity = 0.8
+            halo.opacity = 0.56
             rim.addSublayer(halo)
+            rim.addSublayer(ring)
             group.addSublayer(rim)
             rims.append(rim)
         }
@@ -786,6 +831,8 @@ final class StageView: NSView {
         group.addSublayer(glow([deep.withAlphaComponent(0.95), deep.withAlphaComponent(0.8), deep.withAlphaComponent(0)],
                                [0, 0.5, 1], center: .zero, rx: 120 * k, ry: 120 * k))
         group.opacity = 0
+        // Its glows and rims fade one by one, not as a flattened group (no full offscreen pass).
+        group.allowsGroupOpacity = false
         root.addSublayer(group)
         tunnel = group
     }
@@ -851,15 +898,34 @@ final class StageView: NSView {
     /// 0 dark, 1 full light; follows the drag (the spec's p).
     func setIntensity(_ value: CGFloat) {
         intensity = min(1, max(0, value))
+        gpu?.setIntensity(intensity)
+        sky?.setIntensity(intensity)
+        courier?.hold(intensity)
         still {
             ambient.opacity = Float(pow(intensity, 0.7))
             arrange()
         }
     }
 
+    /// The card's exit height while the finger holds it: the edge's light
+    /// (vignette, slit, membrane, rims, breeze, ribbon) moves with it, and
+    /// stays where the card left once it is flicked.
+    func moveSeam(toY y: CGFloat) {
+        let dy = y - seam.y
+        guard since == nil, abs(dy) > 0.25 else { return }
+        seam.y = y
+        still {
+            for layer in [vignette, halo, ribbon, tunnel, breeze].compactMap({ $0 }) { layer.position.y += dy }
+        }
+        gpu?.moveSeam(toY: y)
+        sky?.moveSeam(toY: y)
+        still { arrange() }
+    }
+
     /// Where the middle of the card is now: the ribbon, the neck, the lines and the contrails reach it.
     func follow(card center: CGPoint) {
         card = center
+        gpu?.follow(card: center)
         still { arrange() }
     }
 
@@ -867,7 +933,7 @@ final class StageView: NSView {
     /// release the timed motions own the transforms and only what reaches the
     /// moving card (the ribbon, the neck, the lines, the contrails) is set here.
     private func arrange() {
-        let p = intensity, L = CGFloat(effect.flight), held = since == nil
+        let p = intensity, L = CGFloat(flight), held = since == nil
         switch effect {
         case .portal:
             if held { halo?.transform = CATransform3DMakeScale((40 + 130 * p) / 170, (220 + 380 * p) / 600, 1) }
@@ -892,6 +958,7 @@ final class StageView: NSView {
         case .plane:
             if held { breeze?.transform = CATransform3DMakeScale(0.4 + 0.6 * p, 0.4 + 0.6 * p, 1) }
             placeContrails()
+        case .stardust, .lightning, .cheek, .pounce, .mole, .ducks: break
         }
         placeBuild()
         placeGlow()
@@ -912,7 +979,7 @@ final class StageView: NSView {
         let held = Look.buildHeld * pow(seg(intensity, 0.02, 0.7), 0.7)
         if let since {
             build.layer.opacity = Float(lerp(held, Look.buildFlight,
-                                             seg(since, 0, CGFloat(effect.flight), .travel)))
+                                             seg(since, 0, CGFloat(flight), .travel)))
         } else {
             build.layer.opacity = Float(held)
             build.setTurn(Look.rainbowDragTurn * intensity)
@@ -927,7 +994,7 @@ final class StageView: NSView {
     /// The halo and the rim follow the card and its held shape (Wormhole's
     /// turn, Liquid's squash), then fly with it.
     private func placeGlow() {
-        let p = intensity, L = CGFloat(effect.flight)
+        let p = intensity, L = CGFloat(flight)
         cardGlow.position = card
         let (g0, g1) = Look.glowHeld
         let heldOpacity = lerp(g0, g1, p)
@@ -998,8 +1065,11 @@ final class StageView: NSView {
     /// The flick, `t` = 0 at the release: the edge light holds while the card
     /// flies (`effect.flight`) and fades 0.2 s after it lands.
     func send(still t: Double? = nil) {
-        let L = CGFloat(effect.flight), a0 = CGFloat(pow(max(intensity, 0.5), 0.7))
+        let L = CGFloat(flight), a0 = CGFloat(pow(max(intensity, 0.5), 0.7))
         if let t { stillClock = CGFloat(t) } else { sentAt = CACurrentMediaTime() }
+        gpu?.send(still: t, flight: flight)
+        sky?.send(still: t, flight: flight)
+        courier?.send(still: t)
         timeline(ambient, Double(L) + 0.2, still: t, opacity: { s in
             s < 0.1 ? lerp(a0, 1, seg(s, 0, 0.1, .travel)) : 1 - seg(s, L, L + 0.2, .retire)
         })
@@ -1037,6 +1107,7 @@ final class StageView: NSView {
                 timeline(line, 0.26, still: t, opacity: { s in seg(s, 0.09, 0.14) })
                 reveal(line, from: 0.09, to: 0.26, still: t)
             }
+        case .stardust, .lightning, .cheek, .pounce, .mole, .ducks: break
         }
         still { arrange() }
     }
@@ -1064,6 +1135,16 @@ final class StageView: NSView {
         // The hero silhouette is painted before playback, including its blue bloom.
         // Holding the peak for 70 ms makes it readable in motion as well as in a still.
         if t != nil { paintNow() }
+        gpu?.impact(still: t)
+        if let sky {
+            // No impact light: Lightning's one bright beat is the return stroke (the flash cap),
+            // Stardust's the glint on the card. The halo and the build go out with the card.
+            sky.impact(still: t)
+            let b = CGFloat(build.layer.opacity), g = CGFloat(cardGlow.opacity)
+            timeline(build.layer, 0.1, still: t, opacity: { s in b * (1 - seg(s, 0, 0.1, .retire)) })
+            timeline(cardGlow, 0.3, still: t, opacity: { s in g * (1 - seg(s, 0.05, 0.3, .retire)) })
+            return
+        }
         let light = LightLayer(size: impactFrame.size)
         let hero = light.layer
         hero.anchorPoint = lightAnchor
@@ -1102,7 +1183,9 @@ final class StageView: NSView {
     /// A cancel: the light goes out in 140 ms. Returns seconds.
     func fadeOut() -> Double {
         var m = Motion(0.14, ease: .retire)
-        for layer in [ambient, tunnel, ribbon, lines, build?.layer, cardGlow].compactMap({ $0 }) + contrails {
+        _ = sky?.fadeOut()
+        courier?.cancel()
+        for layer in [ambient, tunnel, ribbon, lines, build?.layer, cardGlow, gpu?.layer].compactMap({ $0 }) + contrails {
             let start = CGFloat((layer.presentation() ?? layer).opacity)
             m.opacity = { u in start * (1 - u) }
             m.run(on: layer)
@@ -1116,5 +1199,11 @@ final class StageView: NSView {
             layer.sublayers?.forEach(clear)
         }
         clear(root)
+        gpu?.stop()
+        sky?.stop()
+        courier?.stop()
     }
+
+    /// How long the stage stays after the impact: a courier leaves 0.55 s after L, or later.
+    var afterImpactSeconds: Double { max(Look.impactSeconds, courier?.afterLanding ?? 0) }
 }

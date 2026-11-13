@@ -126,7 +126,7 @@ public final class DropPortalServer: @unchecked Sendable {
         tokenLock.lock(); _effect = effect; _tint = tint; tokenLock.unlock()
     }
 
-    private var _opensLinks = true
+    private var _opensLinks = false
     /// Text that is one web link opens on the Mac; the page is told so in the reply. Safe from any thread.
     public var opensLinks: Bool {
         get { tokenLock.lock(); defer { tokenLock.unlock() }; return _opensLinks }

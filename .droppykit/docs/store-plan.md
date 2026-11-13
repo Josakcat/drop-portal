@@ -4,7 +4,14 @@ Where Drop Portal stands before a Droppy Store submission, what the remaining
 policy questions are, and what the developer has to decide. Written 2026-11-12
 against DroppyKit 1.23.0 (the SDK checkout this package pins).
 
-Status at the time of writing (from the build copy, `~/Library/Caches/Portal/src`):
+Second pass (2026-11-12, Store build 1.0.1): landing sounds off the main
+thread, a user-facing CHANGELOG (the developer history is in
+`.droppykit/docs/history.md`), `docs/` and `design/` moved under `.droppykit/`,
+"Open links from your phone" off for new installs, a Privacy & permissions
+section in the README, the waiver widened to every panel and
+`.fullScreenAuxiliary` removed. See "After the second pass" at the end.
+
+Status at the time of the first pass (from the build copy, `~/Library/Caches/Portal/src`):
 
 | Check | Result |
 | --- | --- |
@@ -21,7 +28,8 @@ Status at the time of writing (from the build copy, `~/Library/Caches/Portal/src
 
 `Sources/DropPortal/LandingPanel.swift` makes four kinds of `LandingPanel`
 (an `NSPanel` subclass, borderless, non-activating, `.floating` level,
-`[.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]`):
+`[.canJoinAllSpaces, .stationary, .ignoresCycle]`; `.fullScreenAuxiliary`
+was removed in the second pass):
 
 1. **Landing card** (`LandingPresenter`): mid-screen on the display with the
    pointer, a thumbnail, name and size; click opens the file (apps, scripts and
@@ -38,15 +46,18 @@ Status at the time of writing (from the build copy, `~/Library/Caches/Portal/src
    just under the card, for at most a few seconds per crossing (closed 0.9 s
    after the impact); not made under Reduce motion.
 
-The waiver on `LandingPanel.swift:16` only names the landing card. The other
-three panels ride on the same `allow-file` waiver without being described.
+Plus, for Mac → phone, the right-edge drop zone (`EdgeZonePanel`, 8 pt, 150 pt
+while its light is open, only during a file drag) and the falling icon
+(`FallingIcon`, click-through, 0.3 s) on a drop. The waiver on
+`LandingPanel.swift:16` now names all of them, why each exists and when each
+closes (second pass).
 
 ### What the host offers instead (DroppyKit 1.23.0)
 
 Read: `Rules.md` (own-window, Asking for an exception), `HUDsAndNotifications.md`,
 `ExpandedSurfaces.md`, `LiveActivities.md`, `Capabilities/`, `Services/DropletServices.swift`.
 None of them lets a droplet choose where on screen something appears, draw
-across the whole screen, or follow a position that changes 60 times a second.
+across the whole screen, or follow a position that changes up to 120 times a second (the display's rate).
 
 | Option | Position | Drag-out / click | Animation | Full-screen effect | Limits | Verdict |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -176,20 +187,13 @@ Icon concept for the merge request (Jordy designs the icon; nothing was
 drawn): a card crossing a vertical edge of light, starting from the SF Symbols
 `iphone.and.arrow.forward` or `rectangle.portrait.and.arrow.right`.
 
-## Remaining blockers
+## Remaining blockers (first pass, kept for the record)
 
-1. **minAPI 1.23.0 is nightly only.** Wait for a Droppy release that ships
-   DroppyKit 1.23.0, then raise `minAppVersion` to it (section 3).
-2. **The `own-window` exception** for four panels, one of them full screen,
-   needs a maintainer's agreement; today's waiver text names only the landing
-   card (section 1). Only the developer can change the waiver.
-3. **`docs/` is not part of a droplet.** The lint notes that `droppykit submit`
-   sends it and the Store refuses it. Move `docs/` (this file and `effects.md`)
-   to `.droppykit/docs/` or out of the package before submitting; `CLAUDE.md`
-   points at `docs/effects.md`.
-4. **Playground check not done.** "Done means" includes the bundle loading in
-   Droppy Playground; this pass did not install anything.
-5. **Two `process` warnings** stay (section 2); review reads them.
+1. minAPI 1.23.0 is nightly only (still open).
+2. The `own-window` exception (still open; waiver text widened in the second pass).
+3. `docs/` in the package (fixed in the second pass).
+4. Playground check not done (still open).
+5. Two `process` warnings (now six, see below).
 
 ## Questions for the user
 
@@ -209,3 +213,71 @@ drawn): a card crossing a vertical edge of light, starting from the SF Symbols
    harness-only fake address and token; today's shots encode the real LAN
    address, so none was used.
 7. Is the icon concept above what you want in the merge request?
+
+## After the second pass (2026-11-12)
+
+### What changed
+
+- **Sounds.** `PortalSound` decides on main (the Sound switch, macOS UI sound
+  effects, the time) and plays on its own serial queue with one
+  `AVAudioPlayer` per effect; a sound that could not start within 1 s is
+  dropped; `stopAll()` in `deactivate()` stops the players and drops anything
+  still queued. Settings' Preview goes through the same `onLanded` path.
+- **CHANGELOG.** One user-facing `## [1.0.1]` entry (about 1.7 KB) for the
+  whole first Store version; no empty `[Unreleased]` on top, because the Store
+  shows the newest heading. The developer history is
+  `.droppykit/docs/history.md`. `Scripts/release.sh` still expects notes under
+  `## [Unreleased]`: for the next GitHub release, add that heading back above
+  the new notes first.
+- **Version 1.0.1.** GitHub already has 1.0.0 without these fixes. Droppy's
+  GitHub updater only offers a higher version, so a 1.0.0 Store build with
+  different code would leave GitHub 1.0.0 users on the old sound path and make
+  two different builds share one number.
+- **Folders.** `docs/` → `.droppykit/docs/`, `design/` (6 GB, gitignored) →
+  `.droppykit/design/`. `droppykit submit` rsyncs the working tree, not git,
+  and excludes `/.droppykit` but has no rule for `design/`; the SDK script is
+  not ours to change, so the folder moved instead.
+- **Defaults.** Open links from your phone: off for new installs; an install
+  that already has a pairing token and no stored value gets `true` written once
+  in `activate`, so nothing changes for existing users. Add received files to
+  File Tray: still on, said in its subtitle, the README and the CHANGELOG.
+- **Waiver.** One `allow-file own-window` line at the top of
+  `LandingPanel.swift` (both lint findings, the `LandingPanel` class and the
+  drop zone's level, fall under it) naming the card, the seam, the stage, the
+  drop zone and the falling icon. It says the exception is asked for in the
+  merge request; it does not claim it was agreed.
+- **No `.fullScreenAuxiliary`.** Nothing is drawn over a full-screen app.
+
+### What removing `.fullScreenAuxiliary` costs
+
+- A file that arrives while a full-screen app is in front has no card and no
+  crossing on the Mac. It is still saved to Downloads › Drop Portal, still put
+  in the File Tray (when that is on), Recent lists it, and the landing sound
+  plays. Text is unaffected (clipboard and a notification).
+- The right-edge drop zone cannot be reached in a full-screen space, so
+  dragging to the right edge does nothing there; ⌃⌥→, the Quick Action, the
+  Send to phone area and the widget still send.
+- Possible follow-up if testers miss it: after ordering the card in, check
+  `panel.isOnActiveSpace`, and when it is false post a notification
+  ("photo.jpg received", Open / Show in Finder) instead.
+
+### Lint (`lint-droplet.py --package . --submit`)
+
+Before this pass: 0 errors, 6 warnings (`process`: FileTray.swift ×2,
+FinderSelection.swift ×2, ShortcutSigner.swift, FolderZip.swift), 1 waiver
+(own-window, two findings), notes for `design/` and `docs/`. After: 0 errors,
+6 warnings, the same waiver, no folder notes; `droppykit validate` "Ready to
+submit", 106 tests pass, shots report no problems. The six `process` warnings stay by design (the lint flags every
+process start; each is bounded, tracked and cancelled in `deactivate()` and
+described in the README).
+
+### Still blocking the Store
+
+1. **minAPI 1.23.0 is nightly only.** Wait for a Droppy release with DroppyKit
+   1.23.0, then raise `minAppVersion` from 15.3.0 to it.
+2. **The `own-window` exception** needs the maintainer's yes, including the
+   full-screen stage; open the Store issue or put it at the top of the merge
+   request. Fallback if refused: HUD card + notification + File Tray.
+3. **Playground check** not done (nothing installed in this pass).
+4. **Six `process` warnings** remain for review to read (not errors).
+5. **`release.sh` and the CHANGELOG**: see above, before the next GitHub release.

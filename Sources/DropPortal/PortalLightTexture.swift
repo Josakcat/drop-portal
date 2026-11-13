@@ -261,6 +261,15 @@ enum PortalLightTexture {
                 out.append(.paper(poly([CGPoint(x: -240, y: side * 245), CGPoint(x: 90, y: side * 140), CGPoint(x: 235, y: 0)]), shade: 0.5))
                 out.append(.paper(poly([CGPoint(x: 145, y: 0), CGPoint(x: 235, y: 0), CGPoint(x: 345, y: side * 5), CGPoint(x: 185, y: side * 30)]), shade: 0.5))
             }
+        case .stardust:
+            // Only a soft glow toward the edge while held: the grains are the effect (SkyCrossing.swift).
+            bloom(gap, 0, 140, 300, 0.3)
+        case .lightning:
+            // A faint glow on the edge; the bolt and its one flash are SkyStage's, under the flash cap.
+            bloom(gap, 0, 110, 260, 0.22)
+        case .cheek, .pounce, .mole, .ducks:
+            // The couriers have no light: the character is the effect (CourierCrossing.swift).
+            break
         }
         // The card's own light is the stage's halo and rim (they follow its pop); none here.
         return out

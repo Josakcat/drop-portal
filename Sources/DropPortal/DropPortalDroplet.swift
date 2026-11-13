@@ -88,6 +88,11 @@ public final class DropPortalDroplet: NSObject, ObservableObject, Droplet {
         static func tint(_ effect: PortalEffect) -> String { "tint.\(effect.rawValue)" }
         static let addToTray = "addToFileTray"
         static let sound = "landingSound"
+        /// A trackpad tap as a card comes out of the edge and lands.
+        static let haptics = "haptics"
+        /// The landing touches (LandingCelebration.swift), both on by default.
+        static let celebration = "landingCelebration"
+        static let kineticName = "kineticName"
         static let edgeSend = "edgeSend"
         /// Recent transfers, `TransferHistory.encoded` (main process writes).
         static let history = "transferHistory"
@@ -153,10 +158,21 @@ public final class DropPortalDroplet: NSObject, ObservableObject, Droplet {
         self.host = host
         // Each effect's own landing sound (PortalSound); Droppy's single drop cue cannot tell them apart.
         landing.onLanded = { [weak self] effect in if self?.sound == true { PortalSound.play(effect) } }
+        CourierCrossing.playCue = { [weak self] samples in if self?.sound == true { CourierSound.play(samples) } }
+        PortalHaptics.refresh()
+        landing.onFeel = { [weak self] beat in if self?.haptics == true { PortalHaptics.play(beat) } }
+        landing.wantsCelebration = { [weak self] in self?.celebration ?? true }
+        landing.wantsKineticName = { [weak self] in self?.kineticName ?? true }
         PortalLog.write("activate args=\(ProcessInfo.processInfo.arguments.dropFirst().joined(separator: " "))")
         let prefs = host.preferences
         readEffect()
         readGuide()
+        // "Open links from your phone" starts off for new installs (1.0.0 Store).
+        // An install from before that already has a pairing token and kept the
+        // old default (on) without storing it: store it, so nothing changes for them.
+        if !prefs.hasValue(forKey: Key.openLinks), prefs.hasValue(forKey: Key.token) {
+            prefs.setValue(true, forKey: Key.openLinks)
+        }
         token = prefs.value(forKey: Key.token, default: "")
         if token.isEmpty && !PortalLog.isSettingsHost {
             token = PairingToken.generate()
@@ -194,7 +210,7 @@ public final class DropPortalDroplet: NSObject, ObservableObject, Droplet {
                    PortalSignal(Signal.sendFiles) { [weak self] in self?.sendOutbox() },
                    PortalSignal(Signal.quickAction) { [weak self] in self?.addQuickAction() },
                    PortalSignal(Signal.edge) { [weak self] in self?.applyEdge() },
-                   PortalSignal(Signal.links) { [weak self] in self?.server?.opensLinks = self?.openLinks ?? true },
+                   PortalSignal(Signal.links) { [weak self] in self?.server?.opensLinks = self?.openLinks ?? false },
                    PortalSignal(Signal.historyCommand) { [weak self] in self?.readHistoryCommand() }]
         prefsWatch = prefs.didChange.sink { [weak self] _ in self?.readEffect() }
         // Partial files a crash or a force quit left behind, off the main actor.
@@ -252,6 +268,9 @@ public final class DropPortalDroplet: NSObject, ObservableObject, Droplet {
         }
         server.start()
         self.server = server
+        // The GPU effects (MetalFX.swift): the shaders compile in the background; until then, and
+        // under Reduce motion or Low Power Mode, crossings play the Core Animation effects.
+        MetalFX.enableLive()
         saveHistory()
         prepareShortcut()
         host?.log.info("Drop Portal starting on port \(Self.port)")
@@ -259,7 +278,7 @@ public final class DropPortalDroplet: NSObject, ObservableObject, Droplet {
         // Previews are a nicety: if this port is taken, files still arrive.
         let peeks = PeekChannel()
         peeks.token = token
-        peeks.setEffect(effect, tint: tint(for: effect))
+        peeks.setEffect(effect, tint: tint(for: effect), kinetic: kineticName)
         peeks.onEvent = { [weak self] event in
             MainActor.assumeIsolated {
                 // A peek queued before tearDown does nothing.
@@ -390,6 +409,10 @@ public final class DropPortalDroplet: NSObject, ObservableObject, Droplet {
         edge.tearDown()
         queue = nil
         landing.tearDown()
+        MetalFX.shutdown()
+        PortalSound.stopAll()
+        CourierCrossing.playCue = nil
+        CourierSound.stopAll()
         state = .stopped
         host = nil
     }
@@ -483,7 +506,7 @@ public final class DropPortalDroplet: NSObject, ObservableObject, Droplet {
         // A new effect or colour paints its light off the main thread now, not on the crossing.
         if warm { landing.prepareLight(new) }
         server?.setEffect(new, tint: tint)
-        peeks?.setEffect(new, tint: tint)
+        peeks?.setEffect(new, tint: tint, kinetic: kineticName)
         if effect != new { effect = new }
         if tints != newTints { tints = newTints }
     }
@@ -533,6 +556,32 @@ public final class DropPortalDroplet: NSObject, ObservableObject, Droplet {
 
     var sound: Bool { host?.preferences.value(forKey: Key.sound, default: true) ?? true }
 
+    func setHaptics(_ on: Bool) {
+        host?.preferences.setValue(on, forKey: Key.haptics)
+        objectWillChange.send()
+    }
+
+    var haptics: Bool { host?.preferences.value(forKey: Key.haptics, default: true) ?? true }
+
+    func setCelebration(_ on: Bool) {
+        host?.preferences.setValue(on, forKey: Key.celebration)
+        objectWillChange.send()
+    }
+
+    /// Sparks, the settle and the glass tilt at each landing.
+    var celebration: Bool { host?.preferences.value(forKey: Key.celebration, default: true) ?? true }
+
+    func setKineticName(_ on: Bool) {
+        host?.preferences.setValue(on, forKey: Key.kineticName)
+        // The main process tells open phone pages with the effect.
+        PortalSignal.post(Signal.effect)
+        readEffect()
+        objectWillChange.send()
+    }
+
+    /// The landed name letter by letter, here and on the phone's "Sent" line.
+    var kineticName: Bool { host?.preferences.value(forKey: Key.kineticName, default: true) ?? true }
+
     private func landed(text: String) {
         received += 1
         if host?.workspace.copyToPasteboard(text) != true {
@@ -559,7 +608,8 @@ public final class DropPortalDroplet: NSObject, ObservableObject, Droplet {
         if !posted { landing.show(text: text) }
     }
 
-    var openLinks: Bool { host?.preferences.value(forKey: Key.openLinks, default: true) ?? true }
+    /// Off unless the user switched it on (installs from before 1.0.0's Store build keep on, see `activate`).
+    var openLinks: Bool { host?.preferences.value(forKey: Key.openLinks, default: false) ?? false }
 
     func setOpenLinks(_ on: Bool) {
         host?.preferences.setValue(on, forKey: Key.openLinks)

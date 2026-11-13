@@ -41,7 +41,7 @@ enum WebPage {
     /// The template with one row per phone shortcut; the script adds the token to each link.
     private static let page = template.replacingOccurrences(of: "<!--shortcut-rows-->", with: PhoneShortcut.allCases.map { kind in
         #"<div class="rec"><div class="rtext"><div class="rname">\#(escape(kind.title))</div><div class="schint">\#(escape(kind.hint))</div></div><a class="btn small" data-shortcut="\#(kind.path)">Add</a></div>"#
-    }.joined())
+    }.joined()).replacingOccurrences(of: "<!--webgl-->", with: WebGLEffect.block + WebSkyEffect.block + WebCourierEffect.block)
 
     private static func escape(_ text: String) -> String {
         text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
@@ -85,6 +85,11 @@ h1 { font-size:28px; margin:0; letter-spacing:-0.02em; }
 .card.sending, .card.sent { opacity:.75; }
 .card.sent .badge { display:flex; color:var(--ok); }
 .card.failed .badge { display:flex; color:var(--bad); }
+.card.sent .badge { flex-direction:column; gap:5px; }
+.kname { display:block; max-width:100%; font-size:12px; font-weight:500; color:#fff; white-space:nowrap; overflow:hidden; }
+.kname .kl { display:inline-block; white-space:pre; }
+.kname .ext { opacity:.62; }
+.sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
 .card.back { transition: transform .25s cubic-bezier(.2,.8,.2,1), opacity .25s; }
 .card .flare { position:absolute; inset:0; pointer-events:none; opacity:0; transition:opacity .25s; background:linear-gradient(90deg, rgba(228,238,255,.95), rgba(150,190,255,.35) 55%, transparent); }
 .card.drag .flare { transition:none; }
@@ -117,6 +122,13 @@ html[data-effect=wormhole] .portal .rift, html[data-effect=plane] .portal .rift,
 .strip .card { position:absolute; left:0; margin:0; box-shadow:none; }
 .plane { left:0; top:0; width:120px; height:72px; margin:-36px 0 0 -60px; filter:drop-shadow(0 0 10px rgba(var(--fx),.85)); }
 .plane svg { width:100%; height:100%; display:block; }
+/* Stardust: a soft glow on the edge with a dusting of grains. Lightning: a faint lavender glow, never red, nothing flashes. */
+html[data-effect=stardust] .portal .rays, html[data-effect=stardust] .portal .rift, html[data-effect=lightning] .portal .rays, html[data-effect=lightning] .portal .rift { display:none; }
+html[data-effect=stardust] .portal::before { background:radial-gradient(circle at 30% 40%, rgba(var(--fx2),.7) 0 1px, transparent 1.5px) 0 0/13px 17px, radial-gradient(ellipse 45% 40% at 0 50%, rgba(var(--fx),.45), rgba(var(--fx3),.12) 55%, rgba(var(--fx3),0)); -webkit-mask:radial-gradient(ellipse 40% 45% at 0 50%, #000, transparent); mask:radial-gradient(ellipse 40% 45% at 0 50%, #000, transparent); }
+html[data-effect=stardust] .portal::after { display:none; }
+html[data-effect=lightning] .portal::before { background:radial-gradient(ellipse 70% 55% at 0 50%, rgba(214,206,255,.5), rgba(170,190,255,.2) 50%, rgba(170,190,255,0)); }
+html[data-effect=lightning] .portal::after { display:none; }
+html[data-effect=lightning] .portal.flash, html[data-effect=stardust] .portal.flash { animation:portalFade .2s both; }
 /* Liquid: a bulge of water on the edge; the card turns into a drop. */
 html[data-effect=liquid] .portal::before { background:radial-gradient(ellipse 55% 40% at 0 50%, rgba(var(--fx2),.95), rgba(var(--fx),.85) 45%, rgba(var(--fx3),.5) 62%, rgba(var(--fx3),0) 74%); }
 html[data-effect=liquid] .portal::after { display:none; }
@@ -304,6 +316,7 @@ header { align-items:center; }
 </section>
 <section class="recent" id="recent" hidden><h2>Recent</h2><div id="recentList"></div></section>
 <section class="shortcuts" id="shortcuts" hidden><h2>iPhone Shortcuts</h2><!--shortcut-rows--><p class="sharehint">Tap Add, then Add Shortcut. After Reset pairing on the Mac, add them again.</p></section>
+<!--webgl-->
 <script>
 (function () {
   "use strict";
@@ -433,6 +446,7 @@ header { align-items:center; }
         var m = JSON.parse(e.data);
         if (m && typeof m.effect === "string") setEffect(m.effect);
         if (m && typeof m.tint === "string") setTint(m.tint);
+        if (m && (m.type === "ready" || m.type === "effect")) kinetic = m.kinetic !== false;
         if (m && m.type === "incoming") incoming(m);
         if (m && m.type === "clipboard" && typeof m.text === "string") clipboard(m.text);
       } catch (_) {}
@@ -463,22 +477,30 @@ header { align-items:center; }
     if (tint === "rainbow") applyTint();
     var f = card._file;
     peek = { id: "p" + Date.now().toString(36) + "-" + (++peekCount), type: "peek-move", progress: 0 };
-    peekSend({ type: "peek-start", id: peek.id, name: f.name || "file", kind: peekKind(f.type || ""), size: f.size, thumb: card._thumb || "", count: count || 1 });
-    peekBeat = setInterval(function () { if (peek) peekSend({ type: peek.type, id: peek.id, progress: peek.progress }); }, 1000);
+    var start = { type: "peek-start", id: peek.id, name: f.name || "file", kind: peekKind(f.type || ""), size: f.size, thumb: card._thumb || "", count: count || 1 };
+    // A courier (WebCourierEffect.swift): the seed both screens play, and the short version.
+    var courier = window.DPCourier && DPCourier.begin(effect, count || 1);
+    if (courier) { start.seed = courier.seed; start.short = courier.short; }
+    peekSend(start);
+    peekBeat = setInterval(function () { if (peek) peekSend({ type: peek.type, id: peek.id, progress: peek.progress, y: peek.y }); }, 1000);
   }
-  function peekUpdate(id, type, progress) {
+  // `y`: the card's middle, 0 top to 1 bottom, so the Mac card comes out at the same height.
+  function peekUpdate(id, type, progress, y) {
     if (!peek || peek.id !== id) return;
     peek.type = type; peek.progress = progress;
+    if (y !== undefined) peek.y = y;
     if (peekFrame) return;
     peekFrame = requestAnimationFrame(function () {
       peekFrame = 0;
-      if (peek) peekSend({ type: peek.type, id: peek.id, progress: peek.progress });
+      if (peek) peekSend({ type: peek.type, id: peek.id, progress: peek.progress, y: peek.y });
     });
   }
-  function peekCommit() {
+  // `r`: how the finger let go (px/s, y down; exit height 0 to 1; degrees), so the Mac card carries the throw on.
+  function peekCommit(r) {
     if (!peek) return null;
     peekFlush();
-    peekSend({ type: "peek-commit", id: peek.id });
+    r = r || {};
+    peekSend({ type: "peek-commit", id: peek.id, vx: r.vx, vy: r.vy, exitY: r.exitY, angle: r.angle });
     peek.type = "peek-progress"; peek.progress = 0;
     return peek.id;
   }
@@ -513,8 +535,8 @@ header { align-items:center; }
   var calmQuery = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
   function calm() { return !!(calmQuery && calmQuery.matches); }
   function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
-  // The crossing effect the Mac chose: portal, liquid, wormhole, beam or plane.
-  var EFFECTS = ["portal", "liquid", "wormhole", "beam", "plane"];
+  // The crossing effect the Mac chose: portal, liquid, wormhole, beam, plane, stardust or lightning.
+  var EFFECTS = ["portal", "liquid", "wormhole", "beam", "plane", "stardust", "lightning"];
   var root = document.documentElement, effect = "portal";
   function setEffect(name) {
     effect = EFFECTS.indexOf(name) < 0 ? "portal" : name;
@@ -575,6 +597,8 @@ header { align-items:center; }
     return "scale(" + f(0.4, 1) + ")";
   }
   function glowOff() {
+    if (window.DropPortalGL) DropPortalGL.off();
+    if (window.DPCourier) DPCourier.off();
     heroLight.style.transform = "";
     portal.classList.remove("live"); portal.style.opacity = "0"; portal.style.transform = "";
     veil.classList.remove("live"); veil.style.opacity = "0";
@@ -583,6 +607,7 @@ header { align-items:center; }
     glowOff(); portal.classList.remove("flash");
     void portal.offsetWidth; // restart the animation
     portal.classList.add("flash");
+    if (window.DropPortalGL) DropPortalGL.flash();
   }
   portal.addEventListener("animationend", function () { portal.classList.remove("flash"); });
 
@@ -728,14 +753,14 @@ header { align-items:center; }
       wasFailed = card.classList.contains("failed");
       if (wasFailed) { card.classList.remove("failed"); }
       active = true; id = e.pointerId; startX = e.clientX; startY = e.clientY; dx = dy = 0;
-      samples = [{ x: e.clientX, t: e.timeStamp }];
+      samples = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
       card.classList.remove("back"); card.classList.add("drag"); card.style.zIndex = 5;
       try { card.setPointerCapture(id); } catch (_) {}
       // How far left the card travels before a release sends it: progress 1.
       var r0 = card.getBoundingClientRect();
       reach = Math.max(40, r0.left + r0.width * 0.35);
       baseLeft = r0.left; baseWidth = r0.width;
-      card._base = { left: r0.left, width: r0.width };
+      card._base = { left: r0.left, width: r0.width, top: r0.top, height: r0.height };
       // A selected card takes every selected card with it, itself first.
       group = [card];
       if (card.classList.contains("selected")) {
@@ -752,7 +777,7 @@ header { align-items:center; }
       if (!active || e.pointerId !== id) return;
       dx = e.clientX - startX; dy = e.clientY - startY;
       if (!gathered && group.length > 1 && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) gather(false);
-      samples.push({ x: e.clientX, t: e.timeStamp }); if (samples.length > 6) samples.shift();
+      samples.push({ x: e.clientX, y: e.clientY, t: e.timeStamp }); if (samples.length > 6) samples.shift();
       var p = clamp01(-dx / reach);
       var move = "translate(" + dx + "px," + dy * 0.4 + "px)", tilt = " rotate(" + dx / 25 + "deg)", t = move + tilt;
       if (!calm()) {
@@ -784,7 +809,11 @@ header { align-items:center; }
       card.style.transform = t;
       if (gathered) group.slice(1).forEach(follow);
       glow(p);
-      if (peek) peekUpdate(peek.id, "peek-move", p);
+      card._angle = effect === "wormhole" && !calm() ? -18 * p : (effect === "liquid" || effect === "beam") && !calm() ? 0 : dx / 25;
+      var cardY = card._base.top + card._base.height / 2 + dy * 0.4;
+      if (window.DropPortalGL) DropPortalGL.hold(p, cardY);
+      if (window.DPCourier) DPCourier.hold(effect, p, card);
+      if (peek) peekUpdate(peek.id, "peek-move", p, clamp01(cardY / (innerHeight || 1)));
     });
     function end(e, cancelled) {
       if (!active || e.pointerId !== id) return;
@@ -797,7 +826,10 @@ header { align-items:center; }
       var tapped = Math.abs(dx) < 10 && Math.abs(dy) < 10;
       if (!cancelled && wasFailed && tapped) { peekEnd("peek-cancel"); glowOff(); unstack(); springBack(card); upload(card); return; }
       if (!cancelled && tapped) { peekEnd("peek-cancel"); glowOff(); unstack(); springBack(card); card.classList.toggle("selected"); return; }
-      if (!cancelled && (pastEdge || flicked)) { if (group.length > 1) gather(true); card._peek = peekCommit(); flyOut(card, dy, rect, group.slice(1)); }
+      // The card's own velocity (it moves 0.4 of the finger's dy) and height, for the Mac's throw.
+      var vy = last.t > first.t ? (last.y - first.y) * 0.4 / (last.t - first.t) : 0;
+      var release = { vx: Math.round(vx * 1000), vy: Math.round(vy * 1000), exitY: clamp01((rect.top + rect.height / 2) / (innerHeight || 1)), angle: card._angle || 0 };
+      if (!cancelled && (pastEdge || flicked)) { if (group.length > 1) gather(true); card._peek = peekCommit(release); flyOut(card, dy, rect, group.slice(1)); }
       else { peekEnd("peek-cancel"); glowOff(); unstack(); springBack(card); }
     }
     card.addEventListener("pointerup", function (e) { end(e, false); });
@@ -833,6 +865,8 @@ header { align-items:center; }
     var batchId = card._peek;
     rest = rest || [];
     var stack = rest.filter(function (c) { return c.classList.contains("stacked"); });
+    // Off screen until it comes home: a "Sent" before that waits for it (sent()).
+    card._away = true; stack.forEach(function (c) { c._away = true; });
     rest.forEach(function (c) {
       c.classList.remove("selected"); c.classList.add("queued"); c._badge.textContent = "Waiting…"; c._batch = batchId;
     });
@@ -860,6 +894,8 @@ header { align-items:center; }
       void node.offsetWidth;
       node.style.transition = ""; node._flare.style.transition = "";
       node.classList.add("back"); node.style.opacity = "";
+      node._away = false;
+      var shown = node._home; node._home = null; if (shown) shown();
     }
     function home() {
       if (finished) return; finished = true;
@@ -869,20 +905,39 @@ header { align-items:center; }
     card.style.opacity = "1";
     // Whatever happens to the animation, the card is back within 1.3 s.
     setTimeout(home, 1300);
+    var courier = window.DPCourier && DPCourier.has(effect);
+    if (calm() && courier) {
+      // A courier under Reduce motion: its sticker beside the card, which fades where it is.
+      glowOff();
+      DPCourier.sticker(effect, rect);
+      play(card, [{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: EASE.F, fill: "forwards" }, home);
+      along([{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: EASE.F, fill: "forwards" });
+      return;
+    }
     if (calm()) {
       // Reduce motion: a plain fade where it is, and the edge light fades.
-      glowFlash();
-      play(card, [{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: EASE.F, fill: "forwards" }, home);
+      // Stardust and Lightning: a fade and a scale to .9 over 200 ms, and no flash on the edge.
+      var skyCalm = effect === "stardust" || effect === "lightning";
+      if (skyCalm) glowOff(); else glowFlash();
+      play(card, skyCalm ? [{ opacity: 1, transform: from || "none" }, { opacity: 0, transform: (from || "") + " scale(.9)" }] : [{ opacity: 1 }, { opacity: 0 }],
+           { duration: skyCalm ? 200 : 160, easing: EASE.F, fill: "forwards" }, home);
       along([{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: EASE.F, fill: "forwards" });
       return;
     }
     // No pull-back: the card leaves from exactly where the finger let go
     // (t = 0), on the spec's curve A, and the edge answers when it is gone.
     var kind = effect, start = from || "none";
+    if (window.DropPortalGL) DropPortalGL.send();
     // Enough to put the card's right edge past the left edge of the screen.
     var exitX = -(base.left + base.width + 40);
     function impact() { glowFlash(); impactBurst(rect); }
-    if (kind === "liquid") {
+    if (courier) {
+      // A courier (WebCourierEffect.swift) takes a drawn copy of the card and leaves through the edge.
+      glowOff();
+      play(card, [{ opacity: 1 }, { opacity: 0 }], { duration: 60, fill: "forwards" });
+      along([{ opacity: 1 }, { opacity: 0 }], { duration: 60, fill: "forwards" });
+      DPCourier.leap(kind, card, rect, function () { setTimeout(home, 120); });
+    } else if (kind === "liquid") {
       // Drawn out into a thin neck into the edge: 1.18 × .88 → 1.80 × .18 in 260 ms.
       card.classList.add("blob"); card._flare.style.opacity = "1";
       var neck = -(base.left + base.width * 0.3);
@@ -912,6 +967,17 @@ header { align-items:center; }
       along(fold, { duration: 100, easing: EASE.O, fill: "forwards" });
       play(card, fold, { duration: 100, easing: EASE.O, fill: "forwards" });
       planeOut(rect, y, function () { impact(); setTimeout(home, 180); });
+    } else if ((kind === "stardust" || kind === "lightning") && window.DropPortalSky) {
+      // WebSkyEffect.swift: the card dissolves into grains, or rides one strike off the edge.
+      along([{ transform: start, opacity: 1 }, { transform: "translate(" + exitX + "px," + y + "px)", opacity: 0 }], { duration: 250, easing: EASE.A, fill: "forwards" });
+      if (kind === "stardust") DropPortalSky.stardust(card, function () { impact(); setTimeout(home, 480); });
+      // Lightning's one bright beat is its own flash (under the cap): the edge only fades.
+      else {
+        // The card rides the bolt off the edge: still for the leader, then away on curve A, gone by 250 ms.
+        play(card, [{ transform: start, opacity: 1 }, { transform: start, opacity: 1, offset: 0.24, easing: "cubic-bezier(.3,0,.8,.15)" },
+                    { transform: "translate(" + exitX + "px," + y + "px)", opacity: 0 }], { duration: 250, fill: "forwards" });
+        DropPortalSky.lightning(card, { start: start, exitX: exitX, y: y }, function () { glowOff(); if (window.DropPortalGL) DropPortalGL.flash(); setTimeout(home, 200); });
+      }
     } else {
       // Portal light: through the edge in 220 ms, fading only in the last 60.
       card._flare.style.opacity = "1";
@@ -1008,8 +1074,68 @@ header { align-items:center; }
 
   function sent(card) {
     card.classList.add("sent"); card._badge.textContent = "Sent";
+    var named = !!(card._file && card._file.name);
     loadRecentSoon();
-    setTimeout(function () { card.classList.add("gone"); setTimeout(function () { remove(card); }, 320); }, 900);
+    function show() {
+      if (named) kineticName(card._badge, card._file.name);
+      setTimeout(function () { card.classList.add("gone"); setTimeout(function () { remove(card); }, 320); }, named ? 1150 : 900);
+    }
+    // Still flying (a quick upload): the name plays once the card is back in view, at most 3 s later.
+    if (!card._away) return show();
+    card._home = show;
+    setTimeout(function () { var go = card._home; card._home = null; if (go) go(); }, 3000);
+  }
+
+  // Kinetic filename, as on the Mac's landed card (LandingTouches.swift): the
+  // name under "Sent" comes in letter by letter, blur to sharp and rising a
+  // few px, stagger min(25, 300 / n) ms, each letter 320 ms, all in by 650 ms.
+  // Cut in the middle first, keeping the extension; VoiceOver reads the full
+  // name once from a hidden copy, never the letters. Reduced motion: a fade.
+  var kinetic = true, measureCtx = null;
+  function textWidth(text, font) {
+    if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
+    measureCtx.font = font;
+    return measureCtx.measureText(text).width;
+  }
+  function splitExt(name) {
+    var dot = name.lastIndexOf(".");
+    if (dot <= 0) return [name, ""];
+    var ext = name.slice(dot);
+    return (ext.length >= 2 && ext.length <= 9 && ext.indexOf(" ") < 0) ? [name.slice(0, dot), ext] : [name, ""];
+  }
+  function cutName(name, max, font) {
+    if (textWidth(name, font) <= max) return name;
+    var parts = splitExt(name), base = Array.from(parts[0]), ext = parts[1];
+    for (var keep = base.length - 1; keep >= 0; keep--) {
+      var head = Math.floor((keep + 1) / 2) + (keep > 6 ? 1 : 0), tail = Math.max(0, keep - head);
+      var cut = base.slice(0, Math.min(head, keep)).join("").replace(/\s+$/, "") + "\u2026" + (tail ? base.slice(-tail).join("") : "").replace(/^\s+/, "") + ext;
+      if (textWidth(cut, font) <= max) return cut;
+    }
+    var short = Array.from("\u2026" + ext);
+    while (short.length > 1 && textWidth(short.join(""), font) > max) short.pop();
+    return short.join("");
+  }
+  function kineticName(box, name) {
+    var line = el("span", "kname"), sr = el("span", "sr"), letters = el("span");
+    sr.textContent = name; letters.setAttribute("aria-hidden", "true");
+    line.appendChild(sr); line.appendChild(letters); box.appendChild(line);
+    var cs = getComputedStyle(line);
+    var text = cutName(name, Math.max(40, box.clientWidth - 28), cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily);
+    if (!kinetic || calm() || !letters.animate) {
+      letters.textContent = text;
+      if (calm() && letters.animate) letters.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: "backwards" });
+      return;
+    }
+    var chars = Array.from(text), n = chars.length, stagger = Math.min(25, 300 / n);
+    var ext = splitExt(text)[1], extAt = ext ? n - Array.from(ext).length : n;
+    chars.forEach(function (ch, i) {
+      var s = el("span", i >= extAt ? "kl ext" : "kl"); s.textContent = ch; letters.appendChild(s);
+      s.animate([
+        { opacity: 0, filter: "blur(3px)", transform: "translate(2px,4.5px)", offset: 0 },
+        { opacity: 1, offset: 0.7 },
+        { opacity: 1, filter: "blur(0px)", transform: "translate(0,0)", offset: 1 }
+      ], { duration: 320, delay: i * stagger, easing: "cubic-bezier(.2,.9,.3,1)", fill: "backwards" });
+    });
   }
 
   // Smaller files: photos are redrawn at most 2560 px on the long edge as JPEG

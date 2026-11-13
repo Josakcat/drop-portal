@@ -83,6 +83,8 @@ public enum PortalTint: Hashable, Sendable {
     public static let lime = PortalTint.color(PortalRGB(hex: "#6BFF1F")!)
     public static let aqua = PortalTint.color(PortalRGB(hex: "#00D4FF")!)
     public static let gold = PortalTint.color(PortalRGB(hex: "#FFC21A")!)
+    /// Lightning's default (not a swatch): its halo turns it ice-blue (SkyColor.lightningSafe).
+    public static let skyBlue = PortalTint.color(PortalRGB(hex: "#1F8FFF")!)
 
     /// The settings' swatches, in order.
     public static let presets: [(name: String, tint: PortalTint)] = [
@@ -98,6 +100,13 @@ public enum PortalTint: Hashable, Sendable {
         case .wormhole: violet
         case .beam: magenta
         case .plane: sunset
+        case .stardust: gold
+        case .lightning: skyBlue
+        // The couriers' colour is their arrival sparkle and dust, one per character.
+        case .cheek: .color(PortalRGB(hex: "#FF9A1F")!)
+        case .pounce: .color(PortalRGB(hex: "#FF7A1A")!)
+        case .mole: .color(PortalRGB(hex: "#FFE11A")!)
+        case .ducks: .color(PortalRGB(hex: "#A6F51F")!)
         }
     }
 

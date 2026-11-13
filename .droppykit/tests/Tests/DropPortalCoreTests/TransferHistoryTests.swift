@@ -189,6 +189,9 @@ final class TransferHistoryTests: XCTestCase {
     func testLinkReplyTellsThePage() async throws {
         let server = DropPortalServer(port: 18796, destination: folder)
         server.token = "t"
+        // Off until the droplet passes the setting (off for new installs).
+        XCTAssertFalse(server.opensLinks)
+        server.opensLinks = true
         let ready = expectation(description: "ready")
         server.onState = { if $0 == .ready { ready.fulfill() } }
         server.start()

@@ -113,14 +113,26 @@ final class CardLook {
     /// Where the drag left the card: p, lean and lift.
     private var held: (p: CGFloat, lean: CGFloat, lift: CGFloat) = (0, 0, 0)
     private(set) var committed = false
-    private let palette: PortalPalette
+    let palette: PortalPalette
+    /// The GPU's picture of the card (MetalCrossing.swift), nil on the Core Animation path.
+    private var gpu: GPUCard?
+    /// Stardust's glint and Lightning's lift (SkyCrossing.swift).
+    private var sky: SkyCard?
+    /// A courier under Reduce motion: its sticker on the landed card (Couriers/CourierCrossing.swift).
+    private var sticker: CourierSticker?
     /// From the host's pivot to the card's centre, for `centred`.
     private var pivot: CGPoint {
         CGPoint(x: cardFrame.midX - host.anchorPoint.x * host.bounds.width,
                 y: cardFrame.midY - host.anchorPoint.y * host.bounds.height)
     }
     /// Release to landing (the spec's L); a fade only under Reduce motion.
-    var flight: Double { calm ? 0 : effect.flight }
+    var flight: Double { calm ? 0 : thrown?.flight ?? effect.flight }
+    /// The phone's throw for this crossing, set before `commit()`: its flight
+    /// time and the card's turn when the finger let go (degrees, y up).
+    var thrown: (flight: Double, turn: CGFloat)?
+    /// The landing celebration (LandingCelebration.swift): the pop settles on
+    /// its critically damped spring instead of the dip and rebound.
+    var settles = false
 
     init(effect: PortalEffect, palette: PortalPalette, calm: Bool, host: CALayer, card: CALayer, cardFrame: CGRect, cardRadius: CGFloat = 18) {
         self.effect = effect
@@ -146,11 +158,20 @@ final class CardLook {
         shade.opacity = 0
         if card.superlayer === host { host.insertSublayer(shade, below: card) } else { host.insertSublayer(shade, at: 0) }
         self.shade = shade
+        gpu = GPUCard(effect: effect, palette: palette, host: host, cardFrame: cardFrame, radius: cardRadius)
         switch effect {
         case .portal, .wormhole: wash = edgeLight([palette.core, palette.glow.withAlphaComponent(0.6), palette.glow.withAlphaComponent(0)])
         case .liquid: buildRounded(palette)
-        case .beam: buildSlices(palette)
+        case .beam: if gpu == nil { buildSlices(palette) }
         case .plane: buildWings(palette)
+        case .stardust, .lightning: sky = SkyCard(effect: effect, host: host, cardFrame: cardFrame, radius: cardRadius)
+        // A courier carries a drawn copy (CourierCrossing.swift); the card itself shows at the landing.
+        case .cheek, .pounce, .mole, .ducks: break
+        }
+        if let gpu {
+            host.addSublayer(gpu.layer)
+            gpu.attach(wings: wings)
+            folds.forEach { $0.isHidden = true }
         }
     }
 
@@ -203,17 +224,18 @@ final class CardLook {
             slices.append(slice)
         }
         // Thin lines, 1 pt every 8 pt, over the slices.
+        // Inset to clear the round corners instead of a rounded mask, which is
+        // an offscreen pass every frame.
         let lines = CAReplicatorLayer()
-        lines.frame = cardFrame
-        lines.cornerRadius = cardRadius
-        lines.masksToBounds = true
+        lines.frame = cardFrame.insetBy(dx: 0, dy: cardRadius * 0.3)
         let line = CAGradientLayer()
-        line.frame = CGRect(x: 0, y: 0, width: cardFrame.width, height: 1)
+        let inset = cardRadius * 0.5
+        line.frame = CGRect(x: inset, y: 0, width: cardFrame.width - 2 * inset, height: 1)
         line.startPoint = CGPoint(x: 1, y: 0.5)
         line.endPoint = CGPoint(x: 0, y: 0.5)
         line.colors = [p.core.cgColor, p.glow.withAlphaComponent(0.35).cgColor]
         lines.addSublayer(line)
-        lines.instanceCount = Int(cardFrame.height / 8)
+        lines.instanceCount = Int(lines.bounds.height / 8)
         lines.instanceTransform = CATransform3DMakeTranslation(0, 8, 0)
         lines.opacity = 0
         host.addSublayer(lines)
@@ -283,12 +305,14 @@ final class CardLook {
     }
 
     /// Beam's slices, Liquid's rounded copy and Paper plane's wings are pictures of the card.
-    var wantsSnapshot: Bool { !calm && (effect == .beam || effect == .liquid || effect == .plane) }
+    var wantsSnapshot: Bool { !calm && (gpu != nil || sky?.hidesCard == true || effect == .beam || effect == .liquid || effect == .plane) }
 
     /// The card's picture. Taken again when the thumbnail arrives.
     func setSnapshot(_ image: CGImage?) {
         photoImage = image
         hasSnapshot = image != nil
+        gpu?.setSnapshot(image)
+        sky?.setSnapshot(image)
         still {
             for layer in slices + wings { layer.contents = image }
             rounded?.contents = image
@@ -297,7 +321,13 @@ final class CardLook {
 
     /// Hides everything right of `maxX` (host coordinates): the card never shows on a screen to the right.
     func clip(toMaxX maxX: CGFloat) {
-        still { clip.frame = CGRect(x: 0, y: 0, width: max(0, min(host.bounds.width, maxX)), height: host.bounds.height) }
+        still {
+            clip.frame = CGRect(x: 0, y: 0, width: max(0, min(host.bounds.width, maxX)), height: host.bounds.height)
+            // A mask costs an offscreen pass of the whole card every frame: only while the screen's edge cuts it.
+            let cut = maxX < host.bounds.width
+            if cut, host.mask == nil { host.mask = clip } else if !cut, host.mask != nil { host.mask = nil }
+        }
+        gpu?.clip(toMaxX: maxX)
     }
 
     /// The whole card's shape: scale, a turn in the screen's plane (degrees),
@@ -334,6 +364,8 @@ final class CardLook {
             let lean = max(-0.4, min(0.4, -velocity / 2600))
             let lift = min(0.07, abs(velocity) / 10000)
             held = (p, lean, lift)
+            gpu?.update(progress: p)
+            if gpu?.drawsPicture == true { card.opacity = 0 }
             let (sx, sy, turn) = heldShape(p)
             switch effect {
             case .portal, .wormhole:
@@ -360,6 +392,12 @@ final class CardLook {
                     folds[i].opacity = Float(0.55 * k)
                 }
                 crease?.opacity = Float(0.7 * k)
+            case .stardust, .lightning:
+                // Stardust on the GPU: the card is the stage's grains until it lands.
+                if sky?.hidesCard == true { card.opacity = 0 }
+            case .cheek, .pounce, .mole, .ducks:
+                // The courier draws the card it carries; this one waits hidden for the landing.
+                card.opacity = 0
             }
             host.sublayerTransform = pose(sx, sy, turn: turn, lean: lean, lift: lift)
             shade?.opacity = Float(0.45 + lift * 5)
@@ -371,14 +409,18 @@ final class CardLook {
     func commit(still t: Double? = nil) {
         guard !calm, !committed else { return }
         committed = true
-        let L = CGFloat(effect.flight), h = held
+        let L = CGFloat(flight), h = held, entryTurn = thrown?.turn ?? 0
+        // The GPU's picture keeps the same clock: the thrown path's flight when there is one.
+        gpu?.commit(still: t, flight: flight)
+        sky?.commit(card: card, still: t, flight: flight)
         let (sx0, sy0, turn0) = heldShape(h.p)
         // Where each effect's material ends the flight.
         let (sx1, sy1): (CGFloat, CGFloat) = effect == .liquid ? (1.08, 0.94) : (1, 1)
         let (sxStart, syStart) = effect == .portal ? (1.04 * sx0, 0.98 * sy0) : (sx0, sy0)
         timeline(host, Double(L), still: t, key: "sublayerTransform", transform: { s in
             let u = seg(s, 0, L, .travel)
-            return self.pose(lerp(sxStart, sx1, u), lerp(syStart, sy1, u), turn: lerp(turn0, 0, u),
+            // The phone's tilt comes in over 60 ms (the held card had none) and straightens with the flight.
+            return self.pose(lerp(sxStart, sx1, u), lerp(syStart, sy1, u), turn: lerp(turn0, 0, u) + entryTurn * min(1, s / 0.06) * (1 - u),
                              lean: lerp(h.lean, 0, u), lift: lerp(h.lift, 0, u))
         })
         switch effect {
@@ -393,9 +435,9 @@ final class CardLook {
             guard hasSnapshot else { break }
             // The slices lock one after another, 12 ms apart, top first: the last at L.
             for (i, slice) in slices.enumerated() {
-                let x0 = 90 * (1 - h.p) * CGFloat(i) / 8, start = 0.012 * CGFloat(i)
+                let x0 = 90 * (1 - h.p) * CGFloat(i) / 8, beat = L / 0.32, start = 0.012 * CGFloat(i) * beat
                 timeline(slice, Double(L), still: t, transform: { s in
-                    CATransform3DMakeTranslation(x0 * (1 - seg(s, start, start + 0.224, .travel)), 0, 0)
+                    CATransform3DMakeTranslation(x0 * (1 - seg(s, start, start + 0.224 * beat, .travel)), 0, 0)
                 })
             }
             if let scan { let o = CGFloat(scan.opacity); timeline(scan, 0.1, still: t, opacity: { s in lerp(o, 0.3, seg(s, 0, 0.1)) }) }
@@ -427,23 +469,40 @@ final class CardLook {
                     return CGPoint(x: base.x - r * sin(phi), y: base.y + r - r * cos(phi))
                 })
             }
+        case .stardust, .lightning: break
+        case .cheek, .pounce, .mole, .ducks: still { card.opacity = 0 }
         }
     }
 
     /// The card is at its spot (the spec's L), `t` = 0: it grows and springs
     /// back with its effect's squash, and its material becomes the card.
     func land(still t: Double? = nil) {
+        if calm, let courier = effect.courier {
+            sticker?.stop()
+            sticker = CourierCrossing.sticker(courier, host: host, cardFrame: cardFrame, still: t)
+        }
         guard !calm else { return }
+        gpu?.land(still: t)
+        sky?.land(still: t)
+        if effect == .portal || effect == .wormhole, gpu?.drawsPicture == true { still { card.opacity = 1 } }
+        if effect.isCourier { still { card.opacity = 1 } }
         let P = effect == .beam ? 1 + (Look.pop - 1) * 0.6 : Look.pop
         // Uniform pop: up to P at 70 ms, a small dip, settled at 0.45 s (beam: no bounce).
-        let pop = effect == .beam ? keys([(0, 1), (0.07, P), (0.3, 1)]) : keys([(0, 1), (0.07, P), (0.2, 0.985), (0.3, 1.006), (0.45, 1)])
+        // Lightning: 1.0 → 1.03 on the stroke, a 0.35 s spring with a little bounce; Stardust: none (its 1.02 → 1 handoff).
+        // Both keep their own even with the landing celebration on (its sparks still play).
+        let pop = effect == .lightning ? keys([(0, 1.03), (0.12, 0.996), (0.22, 1.002), (0.35, 1)])
+            : effect == .stardust ? { (_: CGFloat) in 1 }
+            : settles ? LandingCelebration.settle(peak: P)
+            : effect == .beam ? keys([(0, 1), (0.07, P), (0.3, 1)]) : keys([(0, 1), (0.07, P), (0.2, 0.985), (0.3, 1.006), (0.45, 1)])
         let (qx, qy): ((CGFloat) -> CGFloat, (CGFloat) -> CGFloat) = switch effect {
         case .portal: (keys([(0, 1), (0.07, 1.025), (0.25, 1)]), keys([(0, 1), (0.07, 0.985), (0.25, 1)]))
         case .liquid: (keys([(0, 1.08), (0.032, 1.10), (0.16, 0.96), (0.28, 1.012), (0.42, 1)]),
                        keys([(0, 0.94), (0.032, 0.90), (0.16, 1.035), (0.28, 0.994), (0.42, 1)]))
         case .plane: (keys([(0, 1), (0.12, 1.035), (0.25, 0.992), (0.35, 1.003), (0.45, 1)]),
                       keys([(0, 1), (0.12, 0.98), (0.25, 1.006), (0.35, 0.998), (0.45, 1)]))
-        case .wormhole, .beam: ({ _ in 1 }, { _ in 1 })
+        case .wormhole, .beam, .stardust, .lightning: ({ _ in 1 }, { _ in 1 })
+        // The couriers' container squash, 0.92 × 1.06 for two frames (33 ms).
+        case .cheek, .pounce, .mole, .ducks: (keys([(0, 0.92), (0.033, 0.92), (0.05, 1)]), keys([(0, 1.06), (0.033, 1.06), (0.05, 1)]))
         }
         timeline(host, Look.landSeconds, still: t, key: "sublayerTransform", transform: { s in
             let k = pop(s)
@@ -502,6 +561,7 @@ final class CardLook {
             }
             if let crease { timeline(crease, 0.12, still: t, opacity: { s in 0.7 * (1 - seg(s, 0, 0.12, .retire)) }) }
             timeline(card, 0.12, still: t, opacity: { s in seg(s, 0.04, 0.12, .retire) })
+        case .stardust, .lightning, .cheek, .pounce, .mole, .ducks: break
         }
     }
 
@@ -536,6 +596,9 @@ final class CardLook {
     }
 
     func stop() {
+        gpu?.stop()
+        sky?.stop()
+        sticker?.stop()
         host.removeAllAnimations()
         host.sublayers?.forEach { $0.removeAllAnimations() }
         host.mask = nil
@@ -581,11 +644,13 @@ final class SeamView: NSView {
     /// `centerY`: where on the panel the light is centred (the card's height).
     init(frame: NSRect, effect: PortalEffect, palette: PortalPalette, calm: Bool, centerY: CGFloat? = nil) {
         self.effect = effect
-        self.palette = palette
+        self.palette = effect == .lightning ? palette.lightningSafe : palette
         self.calm = calm
         super.init(frame: frame)
         wantsLayer = true
         let light = Self.lightSize(screenHeight: frame.height)
+        // Its opacity follows the drag every frame: each part fades on its own, no offscreen group.
+        root.allowsGroupOpacity = false
         root.frame = CGRect(x: frame.width - light.width, y: (centerY ?? frame.height / 2) - light.height / 2,
                             width: light.width, height: light.height)
         layer?.addSublayer(root)
@@ -596,6 +661,8 @@ final class SeamView: NSView {
         case .wormhole: buildWormhole()
         case .beam: buildBeam()
         case .plane: buildPlane()
+        case .stardust, .lightning: buildSky()
+        case .cheek, .pounce, .mole, .ducks: break
         }
     }
 
@@ -639,6 +706,24 @@ final class SeamView: NSView {
         core.shadowRadius = 14
         core.shadowOpacity = 1
         root.addSublayer(core)
+    }
+
+    /// Stardust and Lightning: only a soft glow on the edge (Lightning's lavender, never red);
+    /// the dust and the bolt are drawn by the stage.
+    private func buildSky() {
+        let tone: NSColor
+        if effect == .lightning {
+            let s = palette.glow.usingColorSpace(.sRGB) ?? palette.glow
+            let safe = SkyColor.lightningSafe(PortalRGB(red: Double(s.redComponent), green: Double(s.greenComponent), blue: Double(s.blueComponent)))
+                .mixed(with: PortalRGB(red: 0.82, green: 0.76, blue: 1), 0.5)
+            tone = NSColor(srgbRed: safe.red, green: safe.green, blue: safe.blue, alpha: 1)
+        } else {
+            tone = palette.glow
+        }
+        let a: CGFloat = effect == .lightning ? 0.35 : 0.55
+        root.addSublayer(radial([palette.core.withAlphaComponent(0.6 * a), tone.withAlphaComponent(0.45 * a), tone.withAlphaComponent(0)],
+                                [0, 0.35, 1], frame: root.bounds))
+        root.addSublayer(feature)
     }
 
     private func buildPortal() {
@@ -687,24 +772,37 @@ final class SeamView: NSView {
     }
 
     private func buildBeam() {
-        let lines = CAReplicatorLayer()
-        lines.frame = CGRect(x: 0, y: h * 0.12, width: w, height: h * 0.76)
-        let line = CAGradientLayer()
-        line.frame = CGRect(x: w - 130, y: 0, width: 130, height: 1.5)
-        line.startPoint = CGPoint(x: 1, y: 0.5)
-        line.endPoint = CGPoint(x: 0, y: 0.5)
-        line.colors = [palette.glow.cgColor, palette.accent.withAlphaComponent(0).cgColor]
-        lines.addSublayer(line)
-        lines.instanceCount = Int(lines.frame.height / 7)
-        lines.instanceTransform = CATransform3DMakeTranslation(0, 7, 0)
-        let fadeMask = CAGradientLayer()
-        fadeMask.frame = lines.bounds
-        fadeMask.colors = [NSColor.clear.cgColor, NSColor.white.cgColor, NSColor.white.cgColor, NSColor.clear.cgColor]
-        fadeMask.locations = [0, 0.2, 0.8, 1]
-        lines.mask = fadeMask
+        // A line every 7 pt, fading toward the screen and at both ends: baked
+        // once into one bitmap (it was a hundred replicated gradients under a
+        // mask, an offscreen pass of the whole edge every frame).
+        let lines = CALayer()
+        lines.frame = CGRect(x: w - 130, y: h * 0.12, width: 130, height: h * 0.76)
+        lines.contents = Self.beamLines(size: lines.bounds.size, glow: palette.glow, accent: palette.accent)
         feature.addSublayer(lines)
         root.addSublayer(feature)
         edgeLine(palette.core, glow: palette.glow, alpha: 1.3)
+    }
+
+    static func beamLines(size: CGSize, glow: NSColor, accent: NSColor, scale: CGFloat = 2) -> CGImage? {
+        let pw = Int(size.width * scale), ph = Int(size.height * scale)
+        guard pw > 0, ph > 0, let ctx = CGContext(data: nil, width: pw, height: ph, bitsPerComponent: 8, bytesPerRow: 0,
+                                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let across = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: [accent.withAlphaComponent(0).cgColor, glow.cgColor] as CFArray,
+                                      locations: [0, 1]) else { return nil }
+        ctx.scaleBy(x: scale, y: scale)
+        var y: CGFloat = 0
+        while y + 1.5 <= size.height {
+            let v = y / size.height
+            let fade = min(1, v / 0.2, (1 - v) / 0.2)
+            ctx.saveGState()
+            ctx.clip(to: CGRect(x: 0, y: y, width: size.width, height: 1.5))
+            ctx.setAlpha(max(0, fade))
+            ctx.drawLinearGradient(across, start: .zero, end: CGPoint(x: size.width, y: 0), options: [])
+            ctx.restoreGState()
+            y += 7
+        }
+        return ctx.makeImage()
     }
 
     private func buildPlane() {
@@ -733,6 +831,16 @@ final class SeamView: NSView {
     }
 
     /// 0 dark, 1 full light; follows the drag.
+    /// Moves the light to `y` on the panel: the height the card comes out of
+    /// the edge (the phone's exit height, ThrowFlight), until the flick.
+    func moveCenter(toY y: CGFloat) {
+        guard abs(root.position.y - y) > 0.25 else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        root.position.y = y
+        CATransaction.commit()
+    }
+
     func setIntensity(_ value: CGFloat) {
         let value = clamp01(value)
         still {
@@ -827,6 +935,9 @@ final class SeamView: NSView {
             blow.duration = 0.5
             blow.timingFunction = CAMediaTimingFunction(name: .easeOut)
             feature.add(blow, forKey: "blow")
+        case .stardust, .lightning, .cheek, .pounce, .mole, .ducks:
+            // Nothing flares on the edge: Lightning's one bright beat is its stroke; a courier has no light.
+            break
         }
     }
 

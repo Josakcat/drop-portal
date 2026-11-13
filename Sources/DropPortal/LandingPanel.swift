@@ -13,7 +13,7 @@
 //  `SeamView` lights the edge (PortalEffects.swift); this file owns the panels.
 //  Reduce motion: the card fades in and the edge light only fades.
 //
-// droppykit-lint: allow-file own-window: Drop Portal's landing card has to appear mid-screen on the display with the pointer and be dragged from, which neither a HUD nor the notch surface can do; the developer asked for exactly this panel. It is borderless, non-activating, ordered out after a few seconds and closed in deactivate().
+// droppykit-lint: allow-file own-window: Drop Portal makes short-lived borderless, non-activating panels (LandingPanel, level .floating, [.canJoinAllSpaces, .stationary, .ignoresCycle], never over a full-screen app) that no DroppyKit surface can place, because each sits at a point on the screen with the pointer or follows one up to 120 times a second (the display's rate): (1) the landing/peek card, which slides in at the right screen edge while the phone drags, follows the finger, shows "Receiving" and lands mid-screen (click opens the file, drag exports its URL), ordered out a few seconds after landing (longer under the pointer) or when it slides back out on a cancel; (2) the edge seam, a click-through light on that right edge, closed when the card has crossed or on cancel; (3) the stage, a click-through panel the size of the screen just under the card for the crossing effect, closed 0.9 s after the impact, on the next crossing and on a cancel once the card is gone (at most 0.45 s), never made under Reduce motion; (4) the right-edge drop zone, an 8 pt (150 pt while its light is open) panel on each outer right screen edge that exists only while a file drag is on, closed on the drop, on button-up, after 0.6 s without a drop or by a 0.25 s watchdog, with the dropped files' icon falling into the edge (click-through, under a second). All are closed in deactivate() (tearDown). The developer asks the Store maintainer for this exception in the merge request.
 //
 
 import AppKit
@@ -35,10 +35,11 @@ final class LandingPresenter {
     /// Each effect's colour; an effect missing here draws in its default.
     var tints: [PortalEffect: PortalTint] = [:]
     private var peek: PeekCard?
-    private var springTimer: Timer?
+    /// The display's frame clock (PortalFeel.swift): 120 Hz on ProMotion.
+    private var springTimer: FrameClock?
     private var lastTick: CFTimeInterval = 0
     /// A crossing with no finger behind it (a plain arrival or the Preview).
-    private var driveTimer: Timer?
+    private var driveTimer: FrameClock?
     private var driveTasks: [Task<Void, Never>] = []
     /// The light on the screen edge for the current crossing, in front of the card.
     private var seam: PortalSeam?
@@ -46,6 +47,11 @@ final class LandingPresenter {
     private var stage: PortalStage?
     /// A file landed (not a cancel): the droplet plays Droppy's drop sound.
     var onLanded: ((PortalEffect) -> Void)?
+    /// A trackpad tap: as the card comes out of the edge, and at its landing.
+    var onFeel: ((PortalHaptics.Beat) -> Void)?
+    /// The landing touches' switches (LandingCelebration.swift), read at each landing.
+    var wantsCelebration: () -> Bool = { true }
+    var wantsKineticName: () -> Bool = { true }
     /// Several cards flicked together: the landed card counts the files after the first, which do not cross again.
     private var batch: (id: String, total: Int, got: Int, card: LandingView)?
 
@@ -81,7 +87,8 @@ final class LandingPresenter {
             guard let self, self.peek === card else { return }
             self.after(0.18) { [weak self] in
                 guard let self, self.peek === card else { return }
-                self.commit(card)
+                // A brisk flick a little upward, as a finger makes it.
+                self.commit(card, release: PeekRelease(vx: -1700, vy: -220, exitY: 0.42, angle: -5))
                 for step in 1...5 {
                     self.after(0.09 * Double(step)) { [weak self] in
                         guard self?.peek === card else { return }
@@ -130,8 +137,11 @@ final class LandingPresenter {
     private func settle(_ card: PeekCard, image: NSImage, title: String, url: URL?, onOpen: @escaping (URL) -> Void) {
         guard peek === card, !card.leaving else { return }
         if !card.committed { commit(card) }
+        // Stardust: from 0.4 s after the release the landed card takes clicks and
+        // drags in place, under grains still flying; it shows at the impact.
+        let early = !card.impacted && card.takesHitsEarly
         // The file can be here before the card is: it turns into the landed card just after the impact.
-        guard card.impacted else {
+        guard card.impacted || early else {
             card.pendingSettle = { [weak self, weak card] in
                 guard let self, let card else { return }
                 self.settle(card, image: image, title: title, url: url, onOpen: onOpen)
@@ -139,9 +149,11 @@ final class LandingPresenter {
             runSpring()
             return
         }
-        onLanded?(card.look.effect)
-        peek = nil
-        stopSpringIfIdle()
+        if !early {
+            onLanded?(card.look.effect)
+            peek = nil
+            stopSpringIfIdle()
+        }
         let landed = LandingView(image: image, title: title, url: url)
         if card.count > 1 {
             batch = (card.id, card.count, 1, landed)
@@ -161,9 +173,37 @@ final class LandingPresenter {
         if current !== card.panel { dismiss() }
         current = card.panel
         card.panel.ignoresMouseEvents = false
+        if early {
+            // Hit-testable but not drawn: the grains are still forming the card.
+            card.earlyLanded = landed
+            card.reveal = { [weak self, weak card] in
+                guard let self, let card else { return }
+                self.reveal(card, landed: landed, title: title)
+            }
+            return
+        }
+        reveal(card, landed: landed, title: title)
+    }
+
+    /// The landed card shows: depth, the kinetic name, the fade in place.
+    private func reveal(_ card: PeekCard, landed: LandingView, title: String) {
+        if card.earlyLanded != nil {
+            // Stardust's early card: the crossing ends here, at the impact.
+            card.earlyLanded = nil
+            card.reveal = nil
+            onLanded?(card.look.effect)
+            if peek === card { peek = nil }
+            stopSpringIfIdle()
+        }
         // Landed: no edge clip, and a re-form or unfold still playing finishes.
         card.look.unclip()
-        card.panel.hasShadow = true
+        // A contact shadow and the lean toward the pointer (PortalFeel.swift) instead of the window's shadow.
+        card.panel.hasShadow = false
+        let celebrate = wantsCelebration()
+        LandingDepth.attach(under: landed, calm: card.look.calm, glass: celebrate, arm: LandingCelebration.tiltArm)
+        if wantsKineticName(), batch == nil, let label = landed.titleField {
+            KineticTitleView.play(on: label, name: title, calm: card.look.calm)
+        }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.22
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -181,22 +221,18 @@ final class LandingPresenter {
     private func drive(_ card: PeekCard, to end: CGFloat, seconds: Double, done: @escaping () -> Void) {
         driveTimer?.invalidate()
         let start = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
-            MainActor.assumeIsolated {
-                guard let self, self.peek === card, !card.leaving else { return timer.invalidate() }
-                let t = min(1, (CACurrentMediaTime() - start) / seconds)
-                let eased = CGFloat(1 - pow(1 - t, 3)) * end
-                card.target = card.offX + (card.onX - card.offX) * eased
-                self.runSpring()
-                if t >= 1 {
-                    timer.invalidate()
-                    if self.driveTimer === timer { self.driveTimer = nil }
-                    done()
-                }
+        driveTimer = FrameClock(screen: FrameRate.screen(for: card.screen)) { [weak self] timer in
+            guard let self, self.peek === card, !card.leaving else { return timer.invalidate() }
+            let t = min(1, (CACurrentMediaTime() - start) / seconds)
+            let eased = CGFloat(1 - pow(1 - t, 3)) * end
+            card.target = card.offX + (card.onX - card.offX) * eased
+            self.runSpring()
+            if t >= 1 {
+                timer.invalidate()
+                if self.driveTimer === timer { self.driveTimer = nil }
+                done()
             }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        driveTimer = timer
     }
 
     private func after(_ seconds: Double, _ body: @escaping @MainActor () -> Void) {
@@ -222,13 +258,14 @@ final class LandingPresenter {
         switch event {
         case .start(let info):
             startPeek(info, image: nil)
-        case .move(let id, let progress):
+        case .move(let id, let progress, let y):
             guard let card = peek, card.id == id, !card.leaving, !card.committed else { return }
             card.target = card.offX + (card.onX - card.offX) * CGFloat(progress)
+            if let y { card.follow(phoneY: y, progress: progress) }
             runSpring()
-        case .commit(let id):
+        case .commit(let id, let release):
             guard let card = peek, card.id == id, !card.leaving else { return }
-            commit(card)
+            commit(card, release: release)
         case .progress(let id, let progress):
             guard let card = peek, card.id == id, card.committed, !card.leaving else { return }
             card.view.showReceiving(progress: progress)
@@ -243,17 +280,21 @@ final class LandingPresenter {
     }
 
     /// The flick: the card flies from where the finger left it to its spot
-    /// on the travel curve and lands exactly `look.flight` later.
-    private func commit(_ card: PeekCard) {
+    /// and lands exactly `look.flight` later: carrying the phone's throw on
+    /// when the page sent one (`ThrowFlight`), else on the travel curve.
+    private func commit(_ card: PeekCard, release: PeekRelease? = nil) {
         guard !card.committed else { return }
         card.committed = true
         card.flightStart = CACurrentMediaTime()
         card.flightFrom = card.x
         card.target = card.onX
+        // Stardust and Lightning keep their own flight (the grains' and the strike's timeline).
+        if let release, !card.look.calm, !card.look.effect.isSky, !card.look.effect.isCourier { card.throwOn(release) }
+        card.yTarget = card.landY
         card.view.showReceiving(progress: 0)
         card.look.commit()
         seam?.retire(bloom: true)
-        stage?.send()
+        stage?.send(flight: card.look.flight)
         runSpring()
     }
 
@@ -262,10 +303,16 @@ final class LandingPresenter {
     private func impact(_ card: PeekCard) {
         guard !card.impacted else { return }
         card.impacted = true
+        card.look.settles = wantsCelebration()
         card.look.land()
+        if card.look.settles, !card.look.calm {
+            SparkView.play(in: card.container, below: card.view, card: card.view.frame,
+                           tones: card.tones ?? PhotoTones.fallback(card.look.palette))
+        }
+        onFeel?(.land)
         if let stage {
             stage.impact()
-            after(StageView.Look.impactSeconds + 0.05) { [weak self] in
+            after(stage.afterImpactSeconds + 0.05) { [weak self] in
                 stage.close()
                 if self?.stage === stage { self?.stage = nil }
             }
@@ -273,6 +320,27 @@ final class LandingPresenter {
         if let pending = card.pendingSettle {
             card.pendingSettle = nil
             after(0.16, pending)
+        }
+        if let reveal = card.reveal {
+            card.reveal = nil
+            after(0.16, reveal)
+        }
+    }
+
+    /// Stardust's early card was clicked or dragged away before the impact:
+    /// the crossing stops here and its stage finishes on its own clock.
+    private func endEarly(_ card: PeekCard) {
+        guard card.earlyLanded != nil else { return }
+        card.earlyLanded = nil
+        card.reveal = nil
+        onLanded?(card.look.effect)
+        card.look.stop()
+        if peek === card { peek = nil }
+        stopSpringIfIdle()
+        if let stage {
+            let left = max(0, card.look.flight - (CACurrentMediaTime() - card.flightStart))
+            self.stage = nil
+            after(left + StageView.Look.impactSeconds + 0.05) { stage.close() }
         }
     }
 
@@ -318,19 +386,34 @@ final class LandingPresenter {
                                     landing: CGPoint(x: final.midX - origin.x, y: final.midY - origin.y))
             stage.show(below: card.panel)
             self.stage = stage
+            // A courier: this crossing's variant from the phone's seed, and a click on it lands the card now.
+            if let courier = effect.courier {
+                stage.startCourier(CourierPlan(courier: courier, seed: info.seed ?? CourierPlan.randomSeed(), short: info.short, files: info.count),
+                                   screen: screen, image: card.view.snapshot()) { [weak self, weak card] in
+                    guard let self, let card, self.peek === card, card.committed, !card.impacted else { return }
+                    card.flightStart = CACurrentMediaTime() - card.look.flight
+                }
+            }
         }
         // The seam goes in front of the card, so the card comes out of the light.
         let light = PortalSeam(screen: screen, centerY: final.midY, effect: effect, palette: palette, calm: calm)
         light.show()
         seam = light
         if card.look.wantsSnapshot { card.look.setSnapshot(card.view.snapshot()) }
+        if wantsCelebration() {
+            SparkGPU.warm()
+            PhotoTones.sample(image) { [weak card] in card?.tones = $0 }
+        }
         if image == nil, !info.thumb.isEmpty {
             let data = info.thumb, id = info.id
             Task { @MainActor [weak self] in
                 let decoded = await Self.decodeThumbnail(data)
                 guard let decoded, let card = self?.peek, card.id == id else { return }
-                card.view.setThumbnail(NSImage(cgImage: decoded, size: NSSize(width: decoded.width, height: decoded.height)))
+                let picture = NSImage(cgImage: decoded, size: NSSize(width: decoded.width, height: decoded.height))
+                card.view.setThumbnail(picture)
+                PhotoTones.sample(picture) { [weak card] in card?.tones = $0 }
                 if card.look.wantsSnapshot { card.look.setSnapshot(card.view.snapshot()) }
+                if card.look.effect.isCourier { self?.stage?.setCardImage(card.view.snapshot()) }
             }
         }
         return card
@@ -344,11 +427,7 @@ final class LandingPresenter {
     private func runSpring() {
         guard springTimer == nil else { return }
         lastTick = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        springTimer = timer
+        springTimer = FrameClock(screen: FrameRate.screen(for: peek?.screen)) { [weak self] _ in self?.tick() }
     }
 
     private func stopSpringIfIdle() {
@@ -367,7 +446,14 @@ final class LandingPresenter {
         lastTick = now
         guard let card = peek else { return stopSpringIfIdle() }
         let flying = card.committed && !card.leaving && !card.look.calm
-        if flying {
+        if flying, let path = card.path {
+            // The phone's throw carried on: its velocity decelerating into the spot.
+            let t = now - card.flightStart, at = path.position(at: t)
+            card.velocity = (CGFloat(at.x) - card.x) / dt
+            card.x = CGFloat(at.x)
+            card.y = CGFloat(at.y)
+            if t >= path.duration { card.x = card.onX; card.y = card.landY; card.velocity = 0 }
+        } else if flying {
             // After the release: from where the finger left it to the spot on
             // the travel curve, landing exactly `flight` seconds later.
             let u = CGFloat((now - card.flightStart) / max(0.01, card.look.flight))
@@ -381,8 +467,9 @@ final class LandingPresenter {
             let accel = stiffness * (card.target - card.x) - damping * card.velocity
             card.velocity += accel * dt
             card.x += card.velocity * dt
+            card.springY(dt: dt, stiffness: stiffness, damping: damping)
         }
-        if abs(card.target - card.x) < 0.5, abs(card.velocity) < 8 {
+        if abs(card.target - card.x) < 0.5, abs(card.velocity) < 8, card.yAtRest {
             card.x = card.target
             card.velocity = 0
             card.settled = true
@@ -390,15 +477,26 @@ final class LandingPresenter {
             card.settled = false
         }
         card.place()
+        if !card.felt, !card.leaving, card.offX - card.x > 40 { card.felt = true; onFeel?(.appear) }
         if !card.committed {
             let intensity = min(1, max(0, (card.offX - card.x) / max(1, card.offX - card.onX)))
             if !card.leaving { seam?.setIntensity(intensity) }
             // A cancel plays the stage's drag backwards while the card goes back into the edge.
             stage?.setIntensity(intensity)
         }
+        if !card.committed, !card.leaving {
+            // The edge's light stays at the card's exit height (flow's phone y), not the landing's.
+            let exitY = card.center.y
+            seam?.moveCenter(toY: exitY)
+            stage?.moveSeam(toY: exitY)
+        }
         if !card.impacted { stage?.follow(card: card.center) }
         if card.committed, !card.leaving, !card.impacted, flying ? now - card.flightStart >= card.look.flight : card.x - card.onX < 6 {
             impact(card)
+        }
+        if !card.impacted, card.takesHitsEarly, let pending = card.pendingSettle {
+            card.pendingSettle = nil
+            pending()
         }
         if card.settled, card.leaving {
             peek = nil
@@ -435,6 +533,7 @@ final class LandingPresenter {
         holdTask?.cancel()
         holdTask = nil
         guard let panel = current else { return }
+        if let card = peek, card.panel === panel { endEarly(card) }
         current = nil
         let end = Self.scaled(panel.frame, by: 0.25)
         NSAnimationContext.runAnimationGroup({ context in
@@ -451,6 +550,7 @@ final class LandingPresenter {
     /// Closes everything immediately, for deactivate().
     func tearDown() {
         PortalLightTexture.clear()
+        SparkGPU.reset()
         holdTask?.cancel()
         holdTask = nil
         cancelDrives()
@@ -562,13 +662,18 @@ final class LandingPresenter {
 
 // MARK: - Panel
 
+/// The one panel type behind everything in the own-window waiver at the top of
+/// this file: the landing/peek card, the edge seam, the stage, the right-edge
+/// drop zone and the falling icon. No `.fullScreenAuxiliary`: none of them is
+/// drawn over a full-screen app (a file still lands in Downloads › Drop Portal
+/// and the File Tray, and plays its sound; see .droppykit/docs/store-plan.md).
 private final class LandingPanel: NSPanel {
     init(contentRect: NSRect) {
         super.init(contentRect: contentRect, styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
         isFloatingPanel = true
         level = .floating
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true
@@ -614,7 +719,13 @@ final class LandingView: NSView, NSDraggingSource {
         titleLabel = label
     }
 
-    func setTitle(_ text: String) { titleLabel?.stringValue = text }
+    func setTitle(_ text: String) {
+        if let titleLabel { KineticTitleView.stop(on: titleLabel) }
+        titleLabel?.stringValue = text
+    }
+
+    /// The name's label, for the kinetic filename (LandingCelebration.swift).
+    var titleField: NSTextField? { titleLabel }
 
     init(text: String) {
         self.url = nil
@@ -709,7 +820,14 @@ private final class PeekCard {
     let view: PeekView
     let look: CardLook
     /// Card x fully off the right edge, and at the landing spot; the screen's right edge.
-    let offX: CGFloat, onX: CGFloat, y: CGFloat, screenMaxX: CGFloat
+    let offX: CGFloat, onX: CGFloat, screenMaxX: CGFloat
+    /// The card's bottom edge: the landing spot's, unless the phone's height moves it (`follow(phoneY:)`).
+    var y: CGFloat
+    let landY: CGFloat
+    var yTarget: CGFloat
+    var yVelocity: CGFloat = 0
+    /// The phone's throw after the flick, from where the card was; nil flies the travel curve.
+    var path: ThrowFlight?
     /// The screen it crosses onto, for the stage's coordinates.
     let screen: CGRect
     var x: CGFloat
@@ -722,11 +840,23 @@ private final class PeekCard {
     var settled = true
     /// Landed at its spot (the impact played); not before this time.
     var impacted = false
+    /// The trackpad tapped as it came out of the edge.
+    var felt = false
     /// The release: when, and from where.
     var flightStart: CFTimeInterval = 0
     var flightFrom: CGFloat = 0
     /// The landed card, when the file was here before the card.
     var pendingSettle: (@MainActor () -> Void)?
+    /// Stardust: the landed card already takes hits but is not drawn yet; `reveal` shows it at the impact.
+    var earlyLanded: LandingView?
+    var reveal: (@MainActor () -> Void)?
+    /// Stardust's card takes clicks and drags from `Stardust.interactiveAt` after the release.
+    var takesHitsEarly: Bool {
+        look.effect == .stardust && !look.calm && committed && !leaving
+            && CACurrentMediaTime() - flightStart >= Stardust.interactiveAt
+    }
+    /// The picture's two colours for the celebration's sparks; nil uses the effect's.
+    var tones: [NSColor]?
 
     init(id: String, view: PeekView, effect: PortalEffect, palette: PortalPalette, calm: Bool,
          offX: CGFloat, onX: CGFloat, y: CGFloat, screen: CGRect) {
@@ -738,6 +868,8 @@ private final class PeekCard {
         self.offX = offX
         self.onX = onX
         self.y = y
+        self.landY = y
+        self.yTarget = y
         self.screenMaxX = screenMaxX
         self.x = offX
         self.target = offX
@@ -753,6 +885,49 @@ private final class PeekCard {
         look = CardLook(effect: effect, palette: palette, calm: calm, host: container.layer!, card: view.layer!, cardFrame: view.frame)
     }
 
+    /// Where the card's bottom edge may go: the visible frame, a little inside.
+    lazy var yRange: ClosedRange<CGFloat> = {
+        let visible = (NSScreen.screens.first { $0.frame == screen } ?? NSScreen.main)?.visibleFrame ?? screen
+        let inset = visible.height * 0.06, low = visible.minY + inset
+        return low...max(low, visible.maxY - inset - LandingPresenter.fileCardSize.height)
+    }()
+
+    /// The phone card's height (0 top to 1 bottom): the card comes out of
+    /// the edge at that height and drifts half way to its spot with the drag.
+    /// Reduce motion keeps it at its spot.
+    func follow(phoneY: Double, progress: Double) {
+        guard !look.calm else { return }
+        let range = yRange, h = LandingPresenter.fileCardSize.height
+        let mids = Double(range.lowerBound + h / 2)...Double(range.upperBound + h / 2)
+        let entry = CGFloat(ThrowFlight.entryY(exitY: phoneY, in: mids)) - h / 2
+        yTarget = entry + (landY - entry) * 0.5 * CGFloat(min(1, max(0, progress)))
+    }
+
+    /// The same critically damped spring as x, on y.
+    func springY(dt: CGFloat, stiffness: CGFloat, damping: CGFloat) {
+        let accel = stiffness * (yTarget - y) - damping * yVelocity
+        yVelocity += accel * dt
+        y += yVelocity * dt
+        if abs(yTarget - y) < 0.5, abs(yVelocity) < 8 { y = yTarget; yVelocity = 0 }
+    }
+
+    var yAtRest: Bool { y == yTarget && yVelocity == 0 }
+
+    /// The flick carried on: the path from here to the spot with the phone's
+    /// velocity, its time handed to the card's look (and from there the
+    /// stage), so the impact lands when the card does.
+    func throwOn(_ release: PeekRelease) {
+        let k = Double(screen.width / 1280), range = yRange
+        let flight = ThrowFlight(from: .init(Double(x), Double(y)), to: .init(Double(onX), Double(landY)),
+                                 release: .init(release.vx, release.vy), base: look.effect.flight, scale: k,
+                                 yRange: Double(range.lowerBound)...Double(range.upperBound))
+        path = flight
+        yVelocity = 0
+        // Wormhole turns of its own; CSS turns clockwise, layers counter-clockwise.
+        let turn = look.effect == .wormhole ? 0 : -CGFloat(min(30, max(-30, release.angle)))
+        look.thrown = (flight.duration, turn)
+    }
+
     /// The card's middle in the stage's coordinates (the screen's, from its corner).
     var center: CGPoint {
         let size = LandingPresenter.fileCardSize
@@ -760,7 +935,7 @@ private final class PeekCard {
     }
 
     func panelOrigin(x: CGFloat) -> NSPoint {
-        NSPoint(x: x.rounded() - CardLook.margin, y: y - CardLook.margin)
+        NSPoint(x: x.rounded() - CardLook.margin, y: y.rounded() - CardLook.margin)
     }
 
     /// The panel where the spring has the card: invisible at the edge (a
@@ -964,6 +1139,12 @@ private final class PortalSeam {
         view.setIntensity(value)
     }
 
+    /// The light's height in the screen's coordinates from its bottom edge.
+    func moveCenter(toY y: CGFloat) {
+        guard !retiring else { return }
+        view.moveCenter(toY: y)
+    }
+
     /// A send plays the effect's send and fades (about 0.65 s); a cancel holds
     /// the light while the card goes back into it, then fades. The panel closes after.
     func retire(bloom: Bool) {
@@ -1018,8 +1199,29 @@ private final class PortalStage {
 
     func setIntensity(_ value: CGFloat) { view.setIntensity(value) }
     func follow(card center: CGPoint) { view.follow(card: center) }
-    func send() { view.send() }
+    func moveSeam(toY y: CGFloat) { view.moveSeam(toY: y) }
+    func send(flight: Double? = nil) {
+        if let flight, flight > 0 { view.flight = flight }
+        view.send()
+    }
     func impact() { view.impact() }
+    var afterImpactSeconds: Double { view.afterImpactSeconds }
+
+    /// A courier crossing goes live: its plan, the card copy's picture, its frame clock, the click that skips.
+    func startCourier(_ plan: CourierPlan, screen: NSScreen, image: CGImage?, onSkip: @escaping () -> Void) {
+        guard let courier = view.courier else { return }
+        courier.plan = plan
+        courier.setCardImage(image)
+        courier.onSkip = onSkip
+        courier.pointer = { [weak panel] in
+            guard let panel else { return nil }
+            let point = NSEvent.mouseLocation
+            return (CGPoint(x: point.x - panel.frame.minX, y: point.y - panel.frame.minY), NSEvent.pressedMouseButtons & 1 != 0)
+        }
+        courier.start(screen: screen)
+    }
+
+    func setCardImage(_ image: CGImage?) { view.courier?.setCardImage(image) }
 
     /// A cancel: the drag runs backwards as the card goes back (the
     /// presenter keeps feeding p and closes the panel when the card is gone);
@@ -1142,6 +1344,10 @@ public enum PortalPreview {
             try writeEffectShot(effect, palette: .of(effect), light: false, photo: photo, impact: false, progress: 0.85, to: late)
             urls += [mid, late]
         }
+        #if DEBUG
+        // The landing touches, Core Animation path (LandingCelebration.swift).
+        urls += try LandingTouchesProbe.writeShots(to: folder, gpu: false)
+        #endif
         return urls
     }
 
@@ -1183,9 +1389,26 @@ public enum PortalPreview {
     }
 
     @MainActor
-    private static func effectImage(_ effect: PortalEffect, palette: PortalPalette, light: Bool, photo: PeekInfo,
-                                    impact: Bool, impactAt: Double? = nil, progress: CGFloat = 0.5) throws -> CGImage {
+    static func effectImage(_ effect: PortalEffect, palette: PortalPalette, light: Bool, photo: PeekInfo,
+                            impact: Bool, impactAt: Double? = nil, progress: CGFloat = 0.5) throws -> CGImage {
         let size = CGSize(width: 1440, height: 900)
+        let root = effectScene(effect, palette: palette, light: light, photo: photo, impact: impact,
+                               impactAt: impactAt, progress: progress, size: size)
+        let scale: CGFloat = 1
+        guard let ctx = CGContext(data: nil, width: Int(size.width * scale), height: Int(size.height * scale),
+                                  bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw CocoaError(.fileWriteUnknown) }
+        ctx.scaleBy(x: scale, y: scale)
+        root.render(in: ctx)
+        guard let image = ctx.makeImage() else { throw CocoaError(.fileWriteUnknown) }
+        return image
+    }
+
+    /// The desktop, the stage, the card and the edge light of one instant, as layers.
+    @MainActor
+    static func effectScene(_ effect: PortalEffect, palette: PortalPalette, light: Bool, photo: PeekInfo,
+                            impact: Bool, impactAt: Double? = nil, progress: CGFloat = 0.5,
+                            size: CGSize = CGSize(width: 1440, height: 900), sentAt: Double? = nil) -> CALayer {
         let root = CALayer()
         root.frame = CGRect(origin: .zero, size: size)
         let desk = CAGradientLayer()
@@ -1225,13 +1448,18 @@ public enum PortalPreview {
         root.addSublayer(host)
         let look = CardLook(effect: effect, palette: palette, calm: false, host: host, card: cardLayer, cardFrame: cardLayer.frame)
         look.setSnapshot(snapshot)
+        stage.courier?.setCardImage(snapshot)
         look.clip(toMaxX: size.width - host.frame.minX)
         let center = CGPoint(x: host.frame.midX, y: host.frame.midY)
         stage.paintNow()
         stage.setIntensity(p)
         stage.follow(card: center)
         look.update(progress: p, velocity: -700, leaving: false)
-        if impact {
+        if let sentAt {
+            // In flight: the release `sentAt` s ago, not landed yet.
+            look.commit(still: sentAt)
+            stage.send(still: sentAt)
+        } else if impact {
             let t = impactAt ?? (effect == .plane ? 0.085 : effect == .beam ? 0.048 : 0.055), L = effect.flight
             look.commit(still: L + t)
             look.land(still: t)
@@ -1247,15 +1475,7 @@ public enum PortalPreview {
                 root.addSublayer(seamLayer)
             }
         }
-
-        let scale: CGFloat = 1
-        guard let ctx = CGContext(data: nil, width: Int(size.width * scale), height: Int(size.height * scale),
-                                  bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw CocoaError(.fileWriteUnknown) }
-        ctx.scaleBy(x: scale, y: scale)
-        root.render(in: ctx)
-        guard let image = ctx.makeImage() else { throw CocoaError(.fileWriteUnknown) }
-        return image
+        return root
     }
 
     @MainActor

@@ -9,5 +9,7 @@ shots/
 .mcp.json
 .cursor/mcp.json
 design/
-# The chosen Rift Drop logo (design/logo concept 1), kept in git; droppykit submit still leaves it out.
+# Mockups and promo art (6 GB), under .droppykit/ so droppykit submit never sends them.
+/.droppykit/design/
+# The chosen Rift Drop logo (.droppykit/design/logo concept 1), kept in git; droppykit submit still leaves it out.
 !/.droppykit/Portal.icon

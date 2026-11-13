@@ -77,15 +77,24 @@ public final class PeekChannel: @unchecked Sendable {
         set { setEffect(effect, tint: newValue) }
     }
 
+    private var _kinetic = true
+    /// The kinetic filename on the page's "Sent" line (LandingTouches.swift): sent with the effect.
+    public var kineticName: Bool {
+        get { tokenLock.lock(); defer { tokenLock.unlock() }; return _kinetic }
+        set { setEffect(effect, tint: tint, kinetic: newValue) }
+    }
+
     /// Sets both and tells every open page once when either changed.
-    public func setEffect(_ effect: PortalEffect, tint: PortalTint) {
+    public func setEffect(_ effect: PortalEffect, tint: PortalTint, kinetic: Bool? = nil) {
         tokenLock.lock()
-        let changed = _effect != effect || _tint != tint
+        let kinetic = kinetic ?? _kinetic
+        let changed = _effect != effect || _tint != tint || _kinetic != kinetic
         _effect = effect
         _tint = tint
+        _kinetic = kinetic
         tokenLock.unlock()
         if changed {
-            let message = Self.effectMessage("effect", effect, tint)
+            let message = Self.effectMessage("effect", effect, tint, kinetic: kinetic)
             queue.async { [self] in
                 for client in clients.values where client.authenticated { client.send(message) }
             }
@@ -93,8 +102,9 @@ public final class PeekChannel: @unchecked Sendable {
     }
 
     /// `{"type":<type>,"effect":<raw value>,"tint":<#RRGGBB or rainbow>}`; both are plain words.
-    static func effectMessage(_ type: String, _ effect: PortalEffect, _ tint: PortalTint) -> String {
-        #"{"type":"\#(type)","effect":"\#(effect.rawValue)","tint":"\#(tint.stored)"}"#
+    /// `"kinetic":false` is added only when the kinetic filename is off (the page's default is on).
+    static func effectMessage(_ type: String, _ effect: PortalEffect, _ tint: PortalTint, kinetic: Bool = true) -> String {
+        #"{"type":"\#(type)","effect":"\#(effect.rawValue)","tint":"\#(tint.stored)"\#(kinetic ? "" : #","kinetic":false"#)}"#
     }
 
     public func start() {
@@ -259,7 +269,7 @@ public final class PeekChannel: @unchecked Sendable {
                 return client.close(policy: true)
             }
             client.authenticated = true
-            client.send(Self.effectMessage("ready", effect, tint))
+            client.send(Self.effectMessage("ready", effect, tint, kinetic: kineticName))
             if presence.opened() { reportPresence() }
             let handler = onPaired
             DispatchQueue.main.async { handler?() }
